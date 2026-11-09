@@ -972,6 +972,10 @@ export class Game {
     const s = this.save;
     for (const node of STORY_NODES) {
       if (s.story.done.includes(node.id) || s.story.pending.includes(node.id)) continue;
+      /* 幕次门槛：第 N 幕的节点，不到第 N 幕不触发。
+         开局铺满一到八步后 maxStep 一上来就很高，
+         没有这道门槛，「小世界封顶」「玄阴蛊·叛徒」这类后期剧情第一天就会蹦出来。 */
+      if ((node.act || 1) > (s.sect.stage || 1)) continue;
       if (node.cond(this)) {
         s.story.pending.push(node.id);
         this.msg(`剧情触发：${node.title}`, 'story');

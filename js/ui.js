@@ -375,15 +375,33 @@ export const UI = {
       rank: () => this.pRank(), chronicle: () => this.pChronicle(), settings: () => this.pSettings(),
       pending: () => this.pPending(), messages: () => this.pMessages(), autonomy: () => this.pAutonomy(),
     };
-    /* 手指/鼠标还按在抽屉里时不重排，否则点击目标会被销毁，点了等于没点 */
-    if (!force && Date.now() < (this._interactUntil || 0)) return;
+    /* 手指/鼠标还按在抽屉里时不重排，否则点击目标会被销毁，点了等于没点。
+       但 onClick 内部发起的重排不受此限：那时点击已经派发完，
+       再拦就变成「状态改了、界面不动」，正是用户说的点了没反应。 */
+    if (!force && !this._inClick && Date.now() < (this._interactUntil || 0)) return;
     const html = (map[this.panel] || map.pending)();
     /* 内容一模一样就不动 DOM：省掉每秒一次的大树重建与滚动跳动 */
     if (!force && html === this._panelHtml) return;
     this._panelHtml = html;
+    /* 记下这一份内容的指纹：点击分发的收尾要靠它判断该不该补一次重排 */
+    this._panelSig = this.panelSignature();
     const top = body.scrollTop;
     body.innerHTML = html;
     if (top) body.scrollTop = top;
+  },
+
+  /* 策略指纹：自决范围八类 + 法度 + 策略档，合成一小段字符串。
+     只取布尔位，不参数字号，避免又变成逐点抖动。 */
+  _polSig(s) {
+    const p = s.policy || {};
+    const a = p.areas || {};
+    const l = p.laws || {};
+    let out = p.stance || 'balanced';
+    for (const k of AREAS) out += a[k.key] === false ? '0' : '1';
+    for (const k of LAWS) out += l[k.key] ? '1' : '0';
+    const st = s.settings || {};
+    for (const k of Object.keys(st).sort()) out += st[k] ? '1' : '0';
+    return out;
   },
 
   /* 当前面板内容的"同一性"指纹：只有它变了才值得重排。
@@ -403,6 +421,8 @@ export const UI = {
       this.panel === 'workshop' ? Math.round((s.res.lingshi || 0) / 50) + '.' + Math.round((s.res.liangshi || 0) / 50) : '',
       (s.posts.dizige || []).join('.'),
       (s.missions || []).length,
+      /* 策略与开关也会改变面板长相，不进指纹就会出现「改了策略界面不动」 */
+      this._polSig(s),
       refs,
     ].join('|');
   },
@@ -986,13 +1006,16 @@ export const UI = {
     const need = g.need(d);
     const pct = Math.min(100, (d.prog / need) * 100);
     const lifeLeft = Math.max(0, d.life - d.age);
+    /* 第九步就是亲传，名录里直接标明，不必去机构页才看得出来 */
     const typePill = d.type === 'servant' ? '<span class="pill mute">杂役</span>'
       : d.type === 'staff' ? '<span class="pill gold">已转职</span>'
-        : `<span class="pill jade">第${d.step}步</span>`;
+        : d.step >= 9 ? '<span class="pill gold">亲传</span>'
+          : `<span class="pill jade">第${d.step}步</span>`;
     return `
     <div class="card disc-card">
       <div class="disc-top">
         <span class="n">${esc(d.name)}</span>
+        ${d.daohao ? `<span class="tag">${esc(d.daohao)}</span>` : ''}
         ${d.named ? `<span class="pill gold">${esc(d.bgName)}</span>` : ''}
         ${typePill}
         <span class="sp">${STATE_NAME[d.state] || ''}</span>
@@ -1386,6 +1409,12 @@ export const UI = {
   onClick(e) {
     const t = e.target.closest('[data-act]');
     if (!t) return;
+    /* 标记「这是点击内部发起的重排」，让 renderPanel 放行 */
+    this._inClick = true;
+    try { this.dispatchAct(t); } finally { this._inClick = false; }
+  },
+
+  dispatchAct(t) {
     const act = t.dataset.act; const arg = t.dataset.arg || '';
     const g = this.game;
     const done = (rendered) => { if (rendered !== true) this.render(); this.helpers.autoSave && this.helpers.autoSave(); };
@@ -1408,6 +1437,7 @@ export const UI = {
       }
       case 'filter': {
         const [k, v] = arg.split(':');
+        if (this.discFilter[k] === v) break;   /* 已经是这个筛选，不必再建一遍 */
         this.discFilter[k] = v;
         this.discFilter.show = 30;
         this.renderPanel(); break;
@@ -1557,6 +1587,16 @@ export const UI = {
       case 'dip:press': { const r = g.diplomacy(arg, 'press'); this.toast(r.msg); done(); break; }
       case 'layer:open': { const r = g.openNextLayer(); this.toast(r.msg); done(); break; }
       default: break;
+    }
+    /* 点击引发的状态变化必须立刻可见。
+       hold 在 pointerdown 时就把 _interactUntil 推到 1.5 秒后，
+       而不少 case 里紧跟的 renderPanel() 不带 force，会被那个窗口直接挡掉 ——
+       表现就是"点了没反应"：状态变了，界面还停在旧的那一帧。
+       这里按指纹补一刀：状态真变了才强制重排，没变就一个 DOM 都不动。 */
+    const panel = document.getElementById('panel');
+    if (panel && panel.getAttribute('aria-hidden') === 'false') {
+      const sig = this.panelSignature();
+      if (sig && sig !== this._panelSig) this.renderPanel(true);
     }
   },
 
