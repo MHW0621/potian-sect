@@ -1,9 +1,16 @@
-/* 破天宗 · 界面层 */
+/* 破天宗 · 界面层（V1.4）
+ * 主页 = 宗门场景；所有功能面板进单例抽屉；事件不再弹窗，统一进待处理与消息中心。
+ */
 import {
   RESOURCES, RES_BY_KEY, FACILITIES, INSTITUTIONS, LAYERS, REGIONS,
-  MISSION_TEMPLATES, TECHNIQUES, ENDINGS, FACTIONS,
+  MISSION_TEMPLATES, TECHNIQUES, ENDINGS,
 } from './config.js';
 import { STORY_BY_ID, STORY_NODES } from './story.js';
+import { Scene, BUILDINGS } from './scene.js';
+import {
+  deriveMatters, mattersByBuilding, unreadCount, markSeen, snooze,
+  memorials, floaters, STANCES, LAWS, LEVEL, BUILDING_NAMES,
+} from './matters.js';
 
 const esc = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const fmt = (n) => {
@@ -15,47 +22,389 @@ const STAGE_NAME = { 1: '第一幕 立宗', 2: '第二幕 开山', 3: '第三幕
 const STATE_NAME = { cultivate: '修炼中', bottleneck: '瓶颈', injured: '疗伤', mission: '任务中', expedition: '外派', post: '在任', idle: '闲居' };
 const REL_NAME = ['敌对', '冷淡', '中立', '友善', '结盟', '同盟'];
 
+const PANEL_META = {
+  disciples: ['弟子名录', '在册弟子、修为与去留'],
+  org: ['机构席位', '三机构九席，竞选按八维加权'],
+  workshop: ['资源工坊', '库房、产线与营建'],
+  tasks: ['任务派遣', '山门所接的活计与远行'],
+  world: ['大世界', '小世界分层、三方势力与道印'],
+  battle: ['宗门对战', '双方同意才开战'],
+  rank: ['赛季榜单', '只展示公开字段'],
+  chronicle: ['宗门史', '自决与批复皆留痕'],
+  settings: ['设置', '界面偏好与账号'],
+  pending: ['待处理', '日常、重要、待决三级'],
+  messages: ['消息中心', '全部事件，可一键已读'],
+  autonomy: ['破天阁', '施政策略与自决记录'],
+};
+
+const GFX_KEY = 'potian.gfx';
+
+function gfxPref() {
+  try {
+    const raw = localStorage.getItem(GFX_KEY);
+    if (raw) return Object.assign({ q: 2, motion: true }, JSON.parse(raw));
+  } catch (e) { /* ignore */ }
+  const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  return { q: reduce ? 1 : 2, motion: !reduce };
+}
+
 export const UI = {
   game: null,
   helpers: null,
-  panel: 'overview',
+  panel: 'scene',
   msgs: [],
   mods: {},
-  _storyOpen: false,
+  scene: null,
   discFilter: { type: 'all', sort: 'power', q: '' },
+  msgFilter: 'all',
+  templeTab: 'memo',
+  gfx: gfxPref(),
 
   mount(game, helpers) {
     this.game = game;
     this.helpers = helpers;
+    this.flags = Object.assign({ sceneHome: true, pendingMode: true }, helpers.grayscale || {});
     this.msgs = [];
-    this.panel = 'overview';
-    if (!this._stageBound) {
-      this._stageBound = true;
-      document.getElementById('stage').addEventListener('click', (e) => this.onClick(e));
-    }
-    document.querySelectorAll('.nav-item[data-panel]').forEach((b) => {
-      if (b._bound) return;
-      b._bound = true;
-      b.addEventListener('click', () => {
-        this.setPanel(b.dataset.panel);
-        this.closeDrawer();
-      });
-    });
-    this.applyModules(helpers.modules || game.mod);
+    this.panel = 'scene';
+    this.bindOnce();
+    this.applyModules(helpers.modules || game.mod || {});
     this.render();
   },
 
-  /* 全服模块开关：关闭的入口隐藏，误入时提示维护中 */
+  bindOnce() {
+    if (this._bound) return;
+    this._bound = true;
+
+    document.querySelectorAll('.rail-item[data-panel]').forEach((b) => {
+      b.addEventListener('click', () => {
+        this.setPanel(b.dataset.panel);
+        this.closeRail();
+      });
+    });
+    document.getElementById('panelClose').addEventListener('click', () => this.closePanel());
+    document.getElementById('btnPending').addEventListener('click', () => this.setPanel('pending'));
+    document.getElementById('btnMsg').addEventListener('click', () => this.setPanel('messages'));
+    document.getElementById('btnRail').addEventListener('click', () => this.toggleRail());
+    document.getElementById('railMask').addEventListener('click', () => this.closeRail());
+    document.getElementById('btnTempleBack').addEventListener('click', () => this.backToScene());
+    document.querySelectorAll('#templeTabs .tab').forEach((b) => {
+      b.addEventListener('click', () => {
+        this.templeTab = b.dataset.ttab;
+        document.querySelectorAll('#templeTabs .tab').forEach((x) => x.classList.toggle('is-on', x.dataset.ttab === this.templeTab));
+        this.renderTemple();
+      });
+    });
+    document.getElementById('panelBody').addEventListener('click', (e) => this.onClick(e));
+    document.getElementById('templeStage').addEventListener('click', (e) => this.onClick(e));
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') {
+        if (document.getElementById('view-temple').classList.contains('is-active')) this.backToScene();
+        else this.closePanel();
+      }
+    });
+  },
+
+  /* ---------- 场景 ---------- */
+  ensureScene() {
+    /* 场景开关关闭时走旧看板，不加载 canvas */
+    if (!this.flags.sceneHome) { this.renderBoard(); return; }
+    if (this.scene) return;
+    this.teardownBoard();
+    const canvas = document.getElementById('sceneCanvas');
+    const overlay = document.getElementById('sceneOverlay');
+    if (!canvas || !overlay) return;
+    this.scene = new Scene({
+      canvas,
+      overlay,
+      onOpen: (key) => {
+        const b = BUILDINGS.find((x) => x.key === key);
+        if (!b) return;
+        if (b.panel === 'temple') this.openTemple();
+        else this.setPanel(b.panel);
+      },
+      onSelect: (key) => {
+        const b = BUILDINGS.find((x) => x.key === key);
+        const hint = document.getElementById('sceneHint');
+        if (hint && b) { hint.textContent = `${b.name} · 再点一次进入`; hint.classList.remove('off'); }
+      },
+    });
+    this.scene.onDowngrade = (q) => {
+      this.gfx.q = q;
+      this.saveGfx();
+      this.toast('帧率偏低，画质已自动降为「' + ['极简', '流畅', '标准', '精细'][q] + '」');
+    };
+    this.scene.mount();
+    this.scene.setQuality(this.gfx.q, this.gfx.motion);
+    this.syncScene();
+  },
+
+  enter() {
+    this.ensureScene();
+    if (this.scene) { this.scene.resize(); this.syncScene(); }
+    else this.renderBoard();
+    if (this.panel !== 'scene') this.setPanel(this.panel);
+  },
+
+  syncScene() {
+    if (!this.game) return;
+    const list = deriveMatters(this.game);
+    this._matters = list;
+    if (!this.scene) { this.renderBoard(list); this.syncBadges(list); return; }
+    const g = this.game;
+    const s = g.save;
+    this.scene.setModel({
+      layers: s.layers,
+      day: s.day,
+      badges: mattersByBuilding(list),
+      floaters: floaters(g),
+      figures: this.figurePlan(),
+    });
+    this.syncBadges(list);
+  },
+
+  /* ---------- 场景回退：旧看板（场景开关关闭时） ---------- */
+  renderBoard(list) {
+    const g = this.game;
+    if (!g) return;
+    const stage = document.getElementById('sceneStage');
+    if (!stage) return;
+    const s = g.save;
+    const canvas = document.getElementById('sceneCanvas');
+    const overlay = document.getElementById('sceneOverlay');
+    const hint = document.getElementById('sceneHint');
+    if (canvas) canvas.style.display = 'none';
+    if (overlay) overlay.style.display = 'none';
+    if (hint) hint.style.display = 'none';
+    let box = document.getElementById('boardFallback');
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'boardFallback';
+      box.className = 'board';
+      box.addEventListener('click', (e) => this.onClick(e));
+      stage.appendChild(box);
+    }
+    const ms = list || this._matters || [];
+    const badges = mattersByBuilding(ms);
+    const fl = floaters(g);
+    const layers = s.layers || 1;
+    const cards = BUILDINGS.map((b) => {
+      const bd = badges[b.key];
+      const f = fl[b.key];
+      const locked = b.layer > layers;
+      const note = locked ? '山门未及此层'
+        : (f ? `${f.k} ${fmt(f.v)} / 日` : (b.panel === 'temple' ? '重大事项' : '查看'));
+      return `<button class="board-card ${locked ? 'is-locked' : ''}" data-act="board:open" data-arg="${b.key}">
+        <span class="bc-name">${esc(b.name)}</span>
+        <span class="bc-note">${esc(note)}</span>
+        ${bd ? `<i class="bc-dot lv${bd.level}">${bd.count > 1 ? bd.count : ''}</i>` : ''}
+      </button>`;
+    }).join('');
+    box.innerHTML = `<div class="board-head"><b>宗门看板</b>
+        <small>旧版视图 · 场景开关已关闭</small>
+        <span class="board-count">待办 ${ms.length} 件</span></div>
+      <div class="board-grid">${cards}</div>`;
+  },
+
+  teardownBoard() {
+    const box = document.getElementById('boardFallback');
+    if (box) box.remove();
+    const canvas = document.getElementById('sceneCanvas');
+    const overlay = document.getElementById('sceneOverlay');
+    const hint = document.getElementById('sceneHint');
+    if (canvas) canvas.style.display = '';
+    if (overlay) overlay.style.display = '';
+    if (hint) hint.style.display = '';
+  },
+
+  /* 灰度切换后重建主页 */
+  rebuildHome() {
+    if (this.flags.sceneHome) {
+      this.teardownBoard();
+      this.ensureScene();
+      if (this.scene) { this.scene.resize(); this.syncScene(); }
+    } else {
+      if (this.scene) {
+        this.scene.destroy();
+        this.scene = null;
+        const ov = document.getElementById('sceneOverlay');
+        if (ov) ov.innerHTML = '';
+      }
+      this.syncScene();
+    }
+    this.renderPanel();
+  },
+
+  /* 提示模式回退：旧式阻断弹窗 */
+  storyPopup(node, isEvent) {
+    const g = this.game;
+    if (!g || !node) return;
+    const opts = (node.options || []).map((o, i) => `<button class="choice" data-si="${i}">
+      <b>${esc(o.label)}</b><span>${esc(o.result || '')}</span></button>`).join('');
+    const close = this.modal({
+      title: node.title || node.name || '宗门来信',
+      sub: '旧提示模式 · 事件会打断当前操作',
+      body: `<p class="story-text">${esc(node.text || '')}</p><div class="choices">${opts}</div>`,
+      actions: [],
+    });
+    const root = document.getElementById('modalRoot');
+    root.querySelectorAll('[data-si]').forEach((b) => {
+      b.addEventListener('click', () => {
+        const i = Number(b.dataset.si);
+        if (isEvent) g.resolveEvent(i); else g.resolveStory(node.id, i);
+        close();
+        this.render();
+        this.syncScene();
+      });
+    });
+  },
+
+  figurePlan() {
+    const g = this.game;
+    const out = [];
+    let n = 0;
+    for (const d of g.save.disciples) {
+      if (n >= 40) break;
+      let t = 5;
+      let kind = 'formal';
+      if (d.type === 'servant') { t = d.id % 2 ? 1 : 2; kind = 'servant'; }
+      else if (d.type === 'staff') { t = d.staffInst === 'hufatang' ? 6 : 7; kind = 'staff'; }
+      else if (d.state === 'injured') { t = 0; kind = 'injured'; }
+      else if (d.state === 'mission' || d.state === 'expedition') { t = 0; kind = 'away'; }
+      else if (d.state === 'post') { t = 6; kind = 'staff'; }
+      else if (d.state === 'bottleneck' || d.demon > 60 || d.step >= 7) { t = 8; kind = 'formal'; }
+      else if (d.step >= 5) { t = 4; kind = 'formal'; }
+      const u = ((d.id * 37) % 100) / 100;
+      out.push({ t, u: 0.16 + u * 0.68, kind, seed: u * 6.28 });
+      n++;
+    }
+    if (!out.length) {
+      out.push({ t: 0, u: 0.32, kind: 'servant', seed: 1 });
+      out.push({ t: 1, u: 0.58, kind: 'servant', seed: 2.4 });
+    }
+    return out;
+  },
+
+  syncBadges(list) {
+    const unread = unreadCount(this.game, list);
+    const decide = list.filter((m) => m.level === 3).length;
+    const topLevel = list.length ? Math.max(...list.map((m) => m.level)) : 0;
+    const setDot = (el, n, lv) => {
+      if (!el) return;
+      el.hidden = n <= 0;
+      if (n > 0) { el.textContent = ''; el.className = 'dot' + (lv === 2 ? ' lv2' : lv === 1 ? ' lv1' : ''); }
+    };
+    setDot(document.getElementById('pendingDot'), unread, topLevel);
+    setDot(document.getElementById('msgDot'), this.unreadNews(), 1);
+
+    const pb = document.getElementById('pendingBadge');
+    if (pb) { pb.hidden = list.length === 0; pb.textContent = list.length; pb.className = 'rail-badge' + (topLevel === 2 ? ' lv2' : topLevel === 1 ? ' lv1' : ''); }
+    const tb = document.getElementById('templeBadge');
+    if (tb) { tb.hidden = decide === 0; tb.textContent = decide; tb.className = 'rail-badge'; }
+    const mb = document.getElementById('msgBadge');
+    if (mb) { const u = this.unreadNews(); mb.hidden = u <= 0; mb.textContent = u; mb.className = 'rail-badge lv1'; }
+  },
+
+  unreadNews() {
+    const s = this.game ? this.game.save : null;
+    if (!s) return 0;
+    const seenDay = (s.matterState && s.matterState.seenDay) || 0;
+    return (s.news || []).filter((x) => x.day > seenDay).length;
+  },
+
+  /* ---------- 顶栏 ---------- */
+  renderTop() {
+    const g = this.game; const s = g.save;
+    document.getElementById('hSect').textContent = s.sect.name;
+    document.getElementById('hFounder').textContent = '祖师 · ' + s.sect.founder;
+    document.getElementById('hYear').textContent = Math.floor(s.day / 360) + 1;
+    document.getElementById('hRenown').textContent = fmt(g.renown);
+    document.getElementById('hStone').textContent = fmt(s.res.lingshi || 0);
+    document.querySelectorAll('#speedBox button').forEach((b) => b.classList.toggle('on', Number(b.dataset.speed) === s.sect.speed));
+  },
+
+  render() {
+    if (!this.game) return;
+    this.renderTop();
+    this.syncScene();
+    if (this.panel !== 'scene') this.renderPanel();
+    if (document.getElementById('view-temple').classList.contains('is-active')) this.renderTemple();
+  },
+
+  renderPanel() {
+    const body = document.getElementById('panelBody');
+    if (!body || !this.game) return;
+    const map = {
+      disciples: () => this.pDisciples(), org: () => this.pOrg(), workshop: () => this.pWorkshop(),
+      tasks: () => this.pTasks(), world: () => this.pWorld(), battle: () => this.pBattle(),
+      rank: () => this.pRank(), chronicle: () => this.pChronicle(), settings: () => this.pSettings(),
+      pending: () => this.pPending(), messages: () => this.pMessages(), autonomy: () => this.pAutonomy(),
+    };
+    body.innerHTML = (map[this.panel] || map.pending)();
+  },
+
+  isLive() {
+    return ['disciples', 'workshop', 'world', 'tasks', 'pending', 'messages', 'autonomy'].includes(this.panel);
+  },
+
+  /* ---------- 抽屉 ---------- */
+  setPanel(name) {
+    if (name === 'scene') { this.closePanel(); return; }
+    if (name === 'temple') { this.openTemple(); return; }
+    if (this.panelClosed(name)) { this.toast('该模块维护中，暂未开放'); return; }
+    const meta = PANEL_META[name];
+    if (!meta) return;
+    this.panel = name;
+    document.querySelectorAll('.rail-item[data-panel]').forEach((b) => b.classList.toggle('is-on', b.dataset.panel === name));
+    document.getElementById('panelTitle').textContent = meta[0];
+    document.getElementById('panelSub').textContent = meta[1];
+    this.renderPanel();
+    document.getElementById('panelBody').scrollTop = 0;
+    document.getElementById('view-game').classList.add('panel-open');
+    document.getElementById('panel').setAttribute('aria-hidden', 'false');
+    if (this.scene) this.scene.clearSelection();
+    this.closeRail();
+    if (name === 'messages') this.markNewsSeen();
+    this.syncBadges(this._matters || []);
+  },
+
+  closePanel() {
+    this.panel = 'scene';
+    document.querySelectorAll('.rail-item[data-panel]').forEach((b) => b.classList.toggle('is-on', b.dataset.panel === 'scene'));
+    document.getElementById('view-game').classList.remove('panel-open');
+    document.getElementById('panel').setAttribute('aria-hidden', 'true');
+    const hint = document.getElementById('sceneHint');
+    if (hint) { hint.textContent = '选一处建筑，再点一次进入'; hint.classList.remove('off'); }
+  },
+
+  markNewsSeen() {
+    const s = this.game && this.game.save;
+    if (!s) return;
+    s.matterState = s.matterState || { snooze: {}, seen: {}, seenDay: 0 };
+    s.matterState.seenDay = s.day;
+    if (this.helpers && this.helpers.autoSave) this.helpers.autoSave();
+  },
+
+  toggleRail() {
+    const r = document.getElementById('rail');
+    const m = document.getElementById('railMask');
+    const on = !r.classList.contains('open');
+    r.classList.toggle('open', on);
+    m.classList.toggle('on', on);
+  },
+  closeRail() {
+    document.getElementById('rail').classList.remove('open');
+    document.getElementById('railMask').classList.remove('on');
+  },
+
+  /* ---------- 全服模块开关 ---------- */
   applyModules(mods) {
     this.mods = mods || {};
     const map = { org: 'org', workshop: 'prod', tasks: 'tasks', world: 'world', battle: 'battle', rank: 'rank' };
-    document.querySelectorAll('.nav-item[data-panel]').forEach((b) => {
+    document.querySelectorAll('.rail-item[data-panel]').forEach((b) => {
       const k = map[b.dataset.panel];
-      const off = k && this.mods[k] === false;
-      b.classList.toggle('hide', !!off);
+      b.classList.toggle('hide', !!(k && this.mods[k] === false));
     });
-    const cur = map[this.panel];
-    if (cur && this.mods[cur] === false) this.setPanel('overview');
+    if (this.panelClosed(this.panel)) this.closePanel();
   },
 
   panelClosed(name) {
@@ -64,22 +413,10 @@ export const UI = {
     return !!(k && this.mods[k] === false);
   },
 
-  setPanel(name) {
-    if (this.panelClosed(name)) {
-      this.toast('该模块维护中，暂未开放');
-      return;
-    }
-    this.panel = name;
-    document.querySelectorAll('.nav-item[data-panel]').forEach((b) => b.classList.toggle('is-on', b.dataset.panel === name));
-    this.renderPanel();
-    document.getElementById('stage').scrollTop = 0;
-  },
-
-  closeDrawer() {
-    const d = document.getElementById('sidenav');
-    const m = document.getElementById('drawerMask');
-    if (d) d.classList.remove('open');
-    if (m) m.classList.remove('on');
+  /* 模块关闭时，对应建筑仍可点，但提示维护中 */
+  checkModule(name) {
+    if (this.panelClosed(name)) { this.toast('该模块维护中，暂未开放'); return false; }
+    return true;
   },
 
   toast(text) {
@@ -93,127 +430,281 @@ export const UI = {
   pushMsg(text, type = 'info') {
     this.msgs.unshift({ text, type, day: this.game ? this.game.save.day : 0 });
     if (this.msgs.length > 60) this.msgs.pop();
-    this.renderMsgs();
   },
 
-  renderMsgs() {
-    const ul = document.getElementById('msgList');
-    if (!ul) return;
-    ul.innerHTML = this.msgs.length
-      ? this.msgs.map((m) => `<li class="${m.type}">${esc(m.text)}<span class="d">开宗 ${Math.floor(m.day / 360) + 1} 年 · 第 ${m.day % 360} 日</span></li>`).join('')
-      : '<li class="empty" style="border:0;background:none">暂无消息</li>';
-  },
-
-  /* ---------- 顶栏 ---------- */
-  renderTop() {
-    const g = this.game; const s = g.save;
-    document.getElementById('hSect').textContent = s.sect.name;
-    document.getElementById('hFounder').textContent = '祖师 · ' + s.sect.founder;
-    document.getElementById('hStage').textContent = STAGE_NAME[s.sect.stage].split(' ')[0];
-    document.getElementById('hRenown').textContent = fmt(g.renown);
-    document.getElementById('hFortune').textContent = (s.sect.fortune >= 0 ? '+' : '') + Math.round(s.sect.fortune);
-    document.getElementById('hDisc').textContent = `弟子 ${s.disciples.length}`;
-    document.getElementById('hDate').textContent = `开宗 ${Math.floor(s.day / 360) + 1} 年`;
-    document.querySelectorAll('#speedBox button').forEach((b) => b.classList.toggle('on', Number(b.dataset.speed) === s.sect.speed));
-  },
-
-  render() {
-    this.renderTop();
-    this.renderPanel();
-    this.renderMsgs();
-  },
-
-  renderPanel() {
-    const stage = document.getElementById('stage');
-    if (!stage || !this.game) return;
-    const map = {
-      overview: () => this.pOverview(), disciples: () => this.pDisciples(), org: () => this.pOrg(),
-      workshop: () => this.pWorkshop(), tasks: () => this.pTasks(), world: () => this.pWorld(),
-      battle: () => this.pBattle(), rank: () => this.pRank(), chronicle: () => this.pChronicle(),
-      settings: () => this.pSettings(),
-    };
-    stage.innerHTML = (map[this.panel] || map.overview)();
-  },
-
-  /* ---------- 总览 ---------- */
-  pOverview() {
-    const g = this.game; const s = g.save;
-    const todo = [];
-    const node = g.pendingNode();
-    if (node) todo.push({ t: `待决剧情：${node.title}`, act: `story:open`, arg: node.id });
-    if (g.pendingEvent) todo.push({ t: `异动：${g.pendingEvent.name}`, act: `evt:open`, arg: '' });
-    const bn = g.formal().filter((d) => d.state === 'bottleneck');
-    if (bn.length) todo.push({ t: `${bn.length} 名弟子修为已满，等待突破`, act: 'panel', arg: 'disciples' });
-    const vac = this.vacancies();
-    if (vac.length) todo.push({ t: `${vac.length} 个席位空缺`, act: 'panel', arg: 'org' });
-    s.expeditions.forEach((x) => todo.push({ t: `派遣中：${REGIONS.find((r) => r.key === x.region).name}（剩 ${Math.max(0, x.endDay - s.day)} 日）`, act: 'panel', arg: 'tasks' }));
-    s.missions.forEach((x) => todo.push({ t: `任务中：${MISSION_TEMPLATES.find((m) => m.key === x.tpl).name}（剩 ${Math.max(0, x.endDay - s.day)} 日）`, act: 'panel', arg: 'tasks' }));
-    if (s.res.liangshi < 150) todo.push({ t: '粮仓告急，考虑派遣或减少口粮', act: 'panel', arg: 'workshop' });
-
-    return `
-    <div class="stack">
-      <div class="panel-head">
-        <h2>${esc(s.sect.name)} · 宗门总览</h2>
-        <p>${STAGE_NAME[s.sect.stage]} · 开宗第 ${Math.floor(s.day / 360) + 1} 年 · 小世界已启 ${s.layers} 层</p>
-      </div>
-
-      <div class="metrics">
-        ${this.metric('正式弟子', g.formal().length, '人')}
-        ${this.metric('杂役', g.servants().length, '人')}
-        ${this.metric('杂役以上职员', g.staff().length, '人')}
-        ${this.metric('最高步数', g.maxStep() || 0, '步')}
-        ${this.metric('宗门声望', fmt(g.renown), '')}
-        ${this.metric('气运', (s.sect.fortune >= 0 ? '+' : '') + Math.round(s.sect.fortune), '')}
-      </div>
-
-      <div class="grid g2">
-        <div class="card">
-          <div class="card-head"><div class="t"><h3>待处理</h3><small>回来就知道该做什么</small></div><span class="pill">${todo.length}</span></div>
-          ${todo.length ? `<div class="list">${todo.slice(0, 8).map((x, i) => `
-            <div class="item"><div class="main"><div class="name" style="font-size:13px">${esc(x.t)}</div></div>
-            <div class="act"><button class="btn sm" data-act="${x.act}" data-arg="${esc(x.arg)}">前往</button></div></div>`).join('')}</div>`
-        : '<div class="empty"><strong>诸事已毕</strong>弟子在修炼，山门很安静。</div>'}
+  /* ---------- 待处理 ---------- */
+  pPending() {
+    const list = this._matters || deriveMatters(this.game);
+    if (!list.length) {
+      return `<div class="stack">
+        <div class="card empty" style="background:rgba(255,253,248,.7)"><strong>诸事已毕</strong>阁中依策自处，山门安静。</div>
+        <div class="card"><div class="card-head"><div class="t"><h3>自决记录</h3><small>破天阁</small></div></div>${this.autoLog(4)}</div>
+      </div>`;
+    }
+    const groups = [3, 2, 1].map((lv) => ({ lv, items: list.filter((m) => m.level === lv) })).filter((x) => x.items.length);
+    return `<div class="stack">
+      <div class="card tight">
+        <div class="spread">
+          <div><b style="font-family:var(--f-head)">共 ${list.length} 件</b>
+            <span class="sub">　待决 ${list.filter((m) => m.level === 3).length} · 重要 ${list.filter((m) => m.level === 2).length} · 日常 ${list.filter((m) => m.level === 1).length}</span></div>
+          <button class="btn sm ghost" data-act="pending:read">全部已读</button>
         </div>
+        <p class="hint" style="margin-top:6px">待决事项须去祖师殿批复；日常事务破天阁会自行处置，此处只作备查。</p>
+      </div>
+      ${groups.map((grp) => `
+        <div class="stack" style="gap:8px">
+          <div class="spread" style="padding:0 2px"><span class="sub">${LEVEL[grp.lv].name}</span><span class="sub">${grp.items.length}</span></div>
+          ${grp.items.map((m) => `
+            <div class="matter ${LEVEL[grp.lv].cls}">
+              <div class="m-main">
+                <div class="m-title">${esc(m.title)}</div>
+                <div class="m-desc">${esc(m.desc || '')}</div>
+              </div>
+              <span class="m-lv">${LEVEL[grp.lv].name}</span>
+              <div class="m-act">
+                <button class="btn sm ${m.level === 3 ? 'primary' : ''}" data-act="matter:go" data-arg="${esc(m.ref)}">${m.level === 3 ? '批阅' : '前往'}</button>
+                <button class="btn sm ghost" data-act="matter:snooze" data-arg="${esc(m.ref)}">暂缓</button>
+              </div>
+            </div>`).join('')}
+        </div>`).join('')}
+      <p class="hint center">暂缓的事项四十五日内不再提示。</p>
+    </div>`;
+  },
 
-        <div class="card">
-          <div class="card-head"><div class="t"><h3>宗门近况</h3></div></div>
-          <div class="stack" style="gap:10px">
-            <div class="spread"><span class="sub">修行环境</span><b>×${g.envMul().toFixed(2)}</b></div>
-            <div class="spread"><span class="sub">全宗战力</span><b>${fmt(g.teamPower())}</b></div>
-            <div class="spread"><span class="sub">每日粮耗</span><b>${fmt(s.disciples.length * 0.34 + g.staff().length * 0.2)}</b></div>
-            <div class="spread"><span class="sub">库中灵石</span><b>${fmt(s.res.lingshi)}</b></div>
-            <div class="spread"><span class="sub">库中粮食</span><b>${fmt(s.res.liangshi)}</b></div>
-            <div class="spread"><span class="sub">已决剧情</span><b>${s.story.done.length} / ${STORY_NODES.length}</b></div>
-          </div>
-          <div class="row" style="margin-top:14px;flex-wrap:wrap">
-            <button class="btn primary" data-act="recruit" data-arg="servant">招收杂役</button>
-            <button class="btn" data-act="recruit" data-arg="formal">招收正式弟子</button>
-            <button class="btn ghost" data-act="exam">举行宗内选拔</button>
-          </div>
+  autoLog(n = 6) {
+    const logs = (this.game.save.story.log || []).filter((l) => l.kind === 'auto').slice(0, n);
+    if (!logs.length) return '<div class="empty">破天阁尚未自行处置过事务。</div>';
+    return `<div class="list">${logs.map((l) => `
+      <div class="item"><div class="main">
+        <div class="name" style="font-size:12.5px">${esc(l.title)} <span class="pill mute">${esc(l.label || '')}</span></div>
+        <div class="meta">${esc(l.result || '')}</div>
+        <div class="meta">开宗 ${Math.floor(l.day / 360) + 1} 年 · 第 ${l.day % 360} 日</div>
+      </div></div>`).join('')}</div>`;
+  },
+
+  /* ---------- 消息中心 ---------- */
+  pMessages() {
+    const s = this.game.save;
+    const news = (s.news || []).map((x) => ({ day: x.day, type: x.type, text: x.text }));
+    const autos = (s.story.log || []).filter((l) => l.kind === 'auto')
+      .map((l) => ({ day: l.day, type: 'auto', text: `${l.title}：${l.result || l.label || ''}` }));
+    let all = news.concat(autos).sort((a, b) => b.day - a.day);
+    if (this.msgFilter === 'news') all = all.filter((x) => x.type !== 'auto');
+    if (this.msgFilter === 'auto') all = all.filter((x) => x.type === 'auto');
+    if (this.msgFilter === 'story') all = all.filter((x) => x.type === 'story');
+    if (this.msgFilter === 'bad') all = all.filter((x) => x.type === 'bad');
+    return `<div class="stack">
+      <div class="chips">
+        ${[['all', '全部'], ['news', '宗门'], ['auto', '自决'], ['story', '剧情'], ['bad', '凶信']].map(([k, n]) =>
+      `<button class="chip ${this.msgFilter === k ? 'is-on' : ''}" data-act="msg:filter" data-arg="${k}">${n}</button>`).join('')}
+        <button class="btn sm ghost" style="margin-left:auto" data-act="msg:read">一键已读</button>
+      </div>
+      <div class="list">
+        ${all.length ? all.slice(0, 120).map((x) => `
+          <div class="news-item ${x.type || 'info'}">
+            <div class="n-body">${esc(x.text)}</div>
+            <div class="n-day">${Math.floor(x.day / 360) + 1}年${x.day % 360}日</div>
+          </div>`).join('') : '<div class="empty">暂无消息。</div>'}
+      </div>
+    </div>`;
+  },
+
+  /* ---------- 破天阁 ---------- */
+  pAutonomy() {
+    const g = this.game;
+    const p = g.policy();
+    const areas = p.areas || {};
+    const laws = p.laws || {};
+    const autoN = (g.save.story.log || []).filter((l) => l.kind === 'auto').length;
+    return `<div class="stack">
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>施政策略</h3><small>决定阁中如何自处</small></div></div>
+        <div class="stance-grid">
+          ${STANCES.map((st) => `
+            <button class="stance ${p.stance === st.key ? 'is-on' : ''}" data-act="pol:stance" data-arg="${st.key}">
+              <div class="s-name">${st.name}</div>
+              <div class="s-motto">${st.motto}</div>
+              <div class="s-desc">${st.desc}</div>
+              <div class="s-eff">${st.effect}</div>
+            </button>`).join('')}
         </div>
+        <p class="hint" style="margin-top:10px">策略写入即生效，并同步到云端与其他设备。</p>
       </div>
 
       <div class="card">
-        <div class="card-head"><div class="t"><h3>宗门纪事</h3><small>最近二十条</small></div><button class="btn sm ghost" data-act="panel" data-arg="chronicle">查看全部</button></div>
-        <div class="list">
-          ${(s.story.log || []).slice(0, 4).map((l) => `
-            <div class="item"><div class="main"><div class="name" style="font-size:13px">${esc(l.title)} · ${esc(l.label)}</div>
-            <div class="meta">${esc(l.result)}</div></div></div>`).join('') || '<div class="empty">尚未有决断被写入宗门史。</div>'}
+        <div class="card-head"><div class="t"><h3>自决范围</h3><small>关闭后此类事务回到待处理</small></div></div>
+        ${[['seat', '补缺', '席位空缺时由阁议推举'], ['recruit', '招揽', '杂役不足时自行招收'], ['heal', '疗养', '伤者康复后归队'], ['prod', '排产', '灵田与工坊按例开工']]
+        .map(([k, n, d]) => `
+          <div class="toggle-row">
+            <div><div class="l-name">${n}</div><div class="l-desc">${d}</div></div>
+            <button class="switch ${areas[k] !== false ? 'on' : ''}" data-act="pol:area" data-arg="${k}" aria-label="${n}"></button>
+          </div>`).join('')}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>本阁法度</h3><small>可在祖师殿详阅</small></div>
+          <button class="btn sm ghost" data-act="open:temple-law">去祖师殿</button></div>
+        ${LAWS.map((l) => `
+          <div class="toggle-row">
+            <div><div class="l-name">${l.name}</div><div class="l-desc">${l.desc}</div></div>
+            <button class="switch ${laws[l.key] ? 'on' : ''}" data-act="pol:law" data-arg="${l.key}"></button>
+          </div>`).join('')}
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>自决记录</h3><small>共 ${autoN} 条，均已写入宗门史</small></div>
+          <button class="btn sm ghost" data-act="panel" data-arg="chronicle">全部</button></div>
+        ${this.autoLog(8)}
+      </div>
+    </div>`;
+  },
+
+  /* ---------- 祖师殿 ---------- */
+  openTemple() {
+    this.closePanel();
+    document.querySelectorAll('.rail-item[data-panel]').forEach((b) => b.classList.toggle('is-on', b.dataset.panel === 'temple'));
+    document.getElementById('templeSect').textContent = this.game.save.sect.name;
+    document.querySelectorAll('#templeTabs .tab').forEach((x) => x.classList.toggle('is-on', x.dataset.ttab === this.templeTab));
+    this.renderTemple();
+    document.querySelectorAll('.view').forEach((v) => v.classList.toggle('is-active', v.id === 'view-temple'));
+    window.scrollTo(0, 0);
+  },
+
+  backToScene() {
+    document.querySelectorAll('.view').forEach((v) => v.classList.toggle('is-active', v.id === 'view-game'));
+    this.panel = 'scene';
+    document.querySelectorAll('.rail-item[data-panel]').forEach((b) => b.classList.toggle('is-on', b.dataset.panel === 'scene'));
+    if (this.scene) { this.scene.resize(); this.syncScene(); }
+  },
+
+  renderTemple() {
+    const stage = document.getElementById('templeStage');
+    if (!stage || !this.game) return;
+    if (this.templeTab === 'law') { stage.innerHTML = this.templeLaw(); return; }
+    if (this.templeTab === 'seal') { stage.innerHTML = this.templeSeal(); return; }
+    stage.innerHTML = this.templeMemo();
+  },
+
+  templeMemo() {
+    const list = memorials(this.game);
+    if (!list.length) {
+      return `<div class="card empty" style="padding:46px 20px">
+        <strong>案上无疏</strong>宗门安稳，暂无可陈之事。阁中自处，祖师可去场景走走。
+      </div>
+      <div class="card" style="margin-top:12px">
+        <div class="card-head"><div class="t"><h3>已批近事</h3></div></div>
+        ${this.memorialLog()}
+      </div>`;
+    }
+    return list.map((m, i) => {
+      const current = i === 0;
+      return `<article class="memo" data-memo="${esc(m.ref)}">
+        <header class="memo-head">
+          <span class="memo-seal">${esc(m.seal || '奏')}</span>
+          <div class="m-h"><strong>${esc(m.title)}</strong><span>${esc(m.from || '')}</span></div>
+          <span class="pill ${current ? '' : 'mute'}">${current ? '待批' : '候批'}</span>
+        </header>
+        <div class="memo-body">
+          <div class="memo-sec">
+            <div class="s-t">事由</div>
+            <div class="s-c quote">${esc(m.cause)}</div>
+          </div>
+          <div class="memo-sec">
+            <div class="s-t">影响</div>
+            <div class="s-c warn">${esc(m.impact)}</div>
+          </div>
+          <div class="memo-sec">
+            <div class="s-t">三处置</div>
+            <div class="memo-opts">
+              ${m.options.map((o, k) => `
+                <button class="memo-opt" data-act="memo:pick" data-arg="${esc(m.ref)}|${k}" ${(!current || o.disabled) ? 'disabled' : ''}>
+                  <span class="o-label">${esc(o.label)}</span>
+                  <span class="o-eff">${esc(o.detail || '')}</span>
+                </button>`).join('')}
+            </div>
+          </div>
+        </div>
+        <div class="memo-note">附注：${esc(m.note || '')}${current ? '' : '　· 请先批阅前一件'}</div>
+      </article>`;
+    }).join('') + `<div class="memo-queue">
+      <b>依次批阅</b><span>批复一件后，下一件自动陈上；批语与后果即时写入宗门史。</span>
+    </div>`;
+  },
+
+  memorialLog() {
+    const logs = (this.game.save.story.log || []).filter((l) => l.kind === 'memorial' || l.kind === 'story' || l.kind === 'event').slice(0, 6);
+    if (!logs.length) return '<div class="empty">尚无批语。</div>';
+    return `<div class="list">${logs.map((l) => `
+      <div class="item"><div class="main">
+        <div class="name" style="font-size:13px">${esc(l.title)} <span class="pill mute">${esc(l.label || '')}</span></div>
+        <div class="meta">${esc(l.result || '')}</div>
+        <div class="meta">开宗 ${Math.floor(l.day / 360) + 1} 年 · 第 ${l.day % 360} 日</div>
+      </div></div>`).join('')}</div>`;
+  },
+
+  templeLaw() {
+    const g = this.game;
+    const laws = g.policy().laws || {};
+    return `<div class="stack">
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>法度</h3><small>改一条，即刻行于全宗</small></div></div>
+        ${LAWS.map((l) => `
+          <div class="law-row">
+            <div class="l-main"><div class="l-name">${l.name}</div><div class="l-desc">${l.desc}</div></div>
+            <button class="switch ${laws[l.key] ? 'on' : ''}" data-act="pol:law" data-arg="${l.key}" aria-label="${l.name}"></button>
+          </div>`).join('')}
+        <p class="hint" style="margin-top:10px">法度与施政策略共同决定修炼、产出、忠诚与心魔的走向。</p>
+      </div>
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>当下成效</h3><small>按当前策略与法度折算</small></div></div>
+        <div class="kv" style="font-size:12px">
+          <span>修炼 <b>×${(g.stanceMul().gain * (laws.morning ? 1.04 : 1)).toFixed(2)}</b></span>
+          <span>产出 <b>×${(g.stanceMul().prod * (laws.curfew ? 0.97 : 1) * (laws.bounty ? 0.98 : 1)).toFixed(2)}</b></span>
+          <span>突破 <b>+${Math.round((g.stanceMul().break_ + (laws.curfew ? 0.01 : 0)) * 100)}%</b></span>
+          <span>心魔增速 <b>×${(g.stanceMul().demon * (laws.curfew ? 0.92 : 1)).toFixed(2)}</b></span>
+          <span>忠诚漂移 <b>${g.stanceMul().loyalty > 0 ? '+' : ''}${g.stanceMul().loyalty}/日</b></span>
         </div>
       </div>
     </div>`;
   },
 
-  metric(k, v, unit) {
-    return `<div class="metric"><div class="k">${k}</div><div class="v">${v}${unit ? `<small>${unit}</small>` : ''}</div></div>`;
+  templeSeal() {
+    const g = this.game; const s = g.save;
+    const shard = s.flags.shard || 0;
+    const pathName = s.flags.finalPath
+      ? ({ search: '搜寻第三片', cast: '以宗门之力补铸', shell: '补出一个空壳', mortal: '不再追问' }[s.flags.finalPath] || s.flags.finalPath)
+      : '未定';
+    return `<div class="stack">
+      <div class="seal-panel">
+        <div class="seal-card">
+          <div class="sc-t">道印残片</div>
+          <div class="sc-v">${shard} / 3</div>
+          <div class="seal-frag">
+            ${[0, 1, 2].map((i) => `<i class="${i < shard ? 'on' : ''}">${i < shard ? '印' : '缺'}</i>`).join('')}
+          </div>
+        </div>
+        <div class="seal-card">
+          <div class="sc-t">宗门气运</div>
+          <div class="sc-v">${s.sect.fortune >= 0 ? '+' : ''}${Math.round(s.sect.fortune)}</div>
+          <p class="hint">气运影响异动的吉凶倾向，范围 −100 至 +100。</p>
+        </div>
+        <div class="seal-card">
+          <div class="sc-t">终局路径</div>
+          <div class="sc-v" style="font-size:17px">${esc(pathName)}</div>
+          <p class="hint">${s.ended ? '终局已定：' + ENDINGS[s.ended].name : '尚未定局。问天台仍空着。'}</p>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>印面</h3><small>三分之一完整，纹路断断续续</small></div></div>
+        <p class="hint">它让这片土地被天地承认，也记录着宗门气运。三片归位之前，问天台只是一块石头。</p>
+        <div class="kv" style="font-size:12px;margin-top:10px">
+          <span>已决剧情 <b>${s.story.done.length} / ${STORY_NODES.length}</b></span>
+          <span>小世界 <b>${s.layers} / 10 层</b></span>
+          <span>最高步数 <b>${g.maxStep() || 0}</b></span>
+        </div>
+      </div>
+    </div>`;
   },
-
-  vacancies() {
-    const s = this.game.save; const out = [];
-    for (const inst of INSTITUTIONS) s.posts[inst.key].forEach((id, i) => { if (!id) out.push({ inst: inst.key, i }); });
-    return out;
-  },
-
   /* ---------- 弟子 ---------- */
   pDisciples() {
     const g = this.game;
@@ -223,7 +714,6 @@ export const UI = {
     if (f.type === 'servant') list = list.filter((d) => d.type === 'servant');
     if (f.type === 'staff') list = list.filter((d) => d.type === 'staff');
     if (f.type === 'break') list = list.filter((d) => d.state === 'bottleneck');
-    if (f.q) list = list.filter((d) => d.name.includes(f.q));
     const sorters = {
       power: (a, b) => g.power(b) - g.power(a),
       step: (a, b) => (b.step || 0) - (a.step || 0) || b.star - a.star,
@@ -233,20 +723,19 @@ export const UI = {
     };
     list.sort(sorters[f.sort] || sorters.power);
 
-    return `
-    <div class="stack">
-      <div class="panel-head"><h2>弟子名录</h2><p>共 ${g.save.disciples.length} 人 · 正式 ${g.formal().length} · 杂役 ${g.servants().length} · 转职 ${g.staff().length}</p></div>
+    return `<div class="stack">
       <div class="card tight">
         <div class="row" style="flex-wrap:wrap">
-          ${[['all', '全部'], ['formal', '正式弟子'], ['servant', '杂役'], ['staff', '已转职'], ['break', '待突破']]
+          ${[['all', '全部'], ['formal', '正式'], ['servant', '杂役'], ['staff', '已转职'], ['break', '待突破']]
         .map(([k, n]) => `<button class="btn sm ${f.type === k ? 'primary' : ''}" data-act="filter" data-arg="type:${k}">${n}</button>`).join('')}
-          <span style="flex:1"></span>
+        </div>
+        <div class="row" style="flex-wrap:wrap;margin-top:8px">
           ${[['power', '战力'], ['step', '步数'], ['life', '寿元'], ['demon', '心魔'], ['join', '入门']]
         .map(([k, n]) => `<button class="btn sm ${f.sort === k ? 'ghost' : ''}" data-act="filter" data-arg="sort:${k}">${n}</button>`).join('')}
         </div>
       </div>
-      ${list.length ? `<div class="grid g2">${list.slice(0, 80).map((d) => this.discCard(d)).join('')}</div>` : '<div class="card empty"><strong>还没有弟子</strong>去招收第一批人吧。</div>'}
-      ${list.length > 80 ? `<p class="hint center">仅显示前 80 人</p>` : ''}
+      ${list.length ? list.slice(0, 60).map((d) => this.discCard(d)).join('') : '<div class="card empty"><strong>还没有弟子</strong>去山门收第一批人吧。</div>'}
+      ${list.length > 60 ? `<p class="hint center">仅显示前 60 人</p>` : ''}
     </div>`;
   },
 
@@ -294,12 +783,11 @@ export const UI = {
   /* ---------- 机构 ---------- */
   pOrg() {
     const g = this.game; const s = g.save;
-    const head = `第${g.maxStep() || 0}步为当前最高。护法堂与长老会席位需已转职的第六步以上者；弟子阁席位需亲传弟子（第九步）。`;
     const blocks = INSTITUTIONS.map((inst) => {
       const seats = s.posts[inst.key];
       return `
       <div class="card">
-        <div class="card-head"><div class="t"><h3>${inst.name}</h3><small>${inst.key === 'dizige' ? '亲传弟子保留弟子身份，为全宗唯一例外' : '任职即脱离弟子身份'}</small></div></div>
+        <div class="card-head"><div class="t"><h3>${inst.name}</h3><small>${inst.key === 'dizige' ? '亲传保留弟子身份' : '任职即脱离弟子身份'}</small></div></div>
         <div class="seat-grid">
           ${seats.map((id, i) => {
         const d = id ? g.byId(id) : null;
@@ -317,7 +805,7 @@ export const UI = {
     }).join('');
 
     return `<div class="stack">
-      <div class="panel-head"><h2>机构席位</h2><p>${head}</p></div>
+      <div class="card tight"><p class="hint">第${g.maxStep() || 0}步为当前最高。护法堂与长老会席位需已转职的第六步以上者；弟子阁席位需亲传弟子。空缺由破天阁按策略自行补选，也可在此亲择。</p></div>
       ${blocks}
       <div class="card">
         <div class="card-head"><div class="t"><h3>可转职人员</h3><small>第四步以上正式弟子</small></div></div>
@@ -336,45 +824,44 @@ export const UI = {
   pWorkshop() {
     const g = this.game; const s = g.save;
     const sv = g.servants().length;
+    const sm = g.stanceMul();
     const gong = 1 + (s.fac.gongfang || 0) * 0.3;
     const tian = 1 + (s.fac.lingtian || 0) * 0.28;
+    const prodMul = sm.prod * (g.law('curfew') ? 0.97 : 1) * (g.law('bounty') ? 0.98 : 1);
     const rates = [
-      ['灵植', sv * 0.55 * tian], ['粮食', sv * 0.62 * tian], ['灵药', sv * 0.14 * tian],
-      ['丹药', sv * 0.10 * gong], ['灵石', sv * 0.22 * gong], ['炼器材料', sv * 0.06 * gong],
+      ['灵植', sv * 0.6 * tian], ['粮食', sv * 0.5 * tian], ['灵药', sv * 0.2 * tian],
+      ['丹药', sv * 0.11 * gong], ['灵石', sv * 0.34 * gong], ['炼器材料', sv * 0.07 * gong],
     ];
     return `<div class="stack">
-      <div class="panel-head"><h2>资源与工坊</h2><p>正式弟子不参与任何产线；生产由杂役、弟子阁与长老会转职人员承担。</p></div>
       <div class="card">
-        <div class="card-head"><div class="t"><h3>库房</h3><small>近两日净变化</small></div></div>
+        <div class="card-head"><div class="t"><h3>库房</h3><small>${sm.name}之政 · 产出 ×${prodMul.toFixed(2)}</small></div></div>
         <div class="res-grid">
           ${RESOURCES.map((r) => `<div class="res"><div class="k">${r.name}</div><div class="v">${fmt(s.res[r.key] || 0)}</div><div class="d">${r.desc}</div></div>`).join('')}
         </div>
       </div>
 
-      <div class="grid g2">
-        <div class="card">
-          <div class="card-head"><div class="t"><h3>工坊产线</h3><small>每日产出</small></div></div>
-          <div class="list">
-            ${rates.map(([k, v]) => `<div class="spread" style="padding:6px 0;border-bottom:1px dashed var(--line)"><span class="sub">${k}</span><b>+${fmt(v)} / 日</b></div>`).join('')}
-          </div>
-          <p class="hint" style="margin-top:10px">在岗杂役 ${sv} 人；灵田 ${s.fac.lingtian || 0} 级，工坊 ${s.fac.gongfang || 0} 级。</p>
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>工坊产线</h3><small>每日产出</small></div></div>
+        <div class="list">
+          ${rates.map(([k, v]) => `<div class="spread" style="padding:6px 0;border-bottom:1px dashed var(--line)"><span class="sub">${k}</span><b>+${fmt(v * prodMul)} / 日</b></div>`).join('')}
         </div>
+        <p class="hint" style="margin-top:10px">在岗杂役 ${sv} 人；灵田 ${s.fac.lingtian || 0} 级，工坊 ${s.fac.gongfang || 0} 级。正式弟子不事生产。</p>
+      </div>
 
-        <div class="card">
-          <div class="card-head"><div class="t"><h3>营建</h3><small>消耗资源提升宗门基建</small></div></div>
-          <div class="list">
-            ${FACILITIES.map((f) => {
-          const lv = s.fac[f.key] || 0;
-          const cost = g.buildCost(f.key);
-          const can = lv < f.maxLv && Object.entries(cost).every(([k, v]) => (s.res[k] || 0) >= v);
-          return `<div class="item">
-                <div class="main"><div class="name">${f.name} <span class="pill mute">Lv.${lv}/${f.maxLv}</span></div>
-                <div class="meta">${f.desc}</div>
-                <div class="meta">${Object.entries(cost).map(([k, v]) => `${RES_BY_KEY[k].name} ${v}`).join(' · ')}</div></div>
-                <div class="act"><button class="btn sm ${can ? 'primary' : ''}" data-act="build" data-arg="${f.key}" ${lv >= f.maxLv ? 'disabled' : ''}>${lv >= f.maxLv ? '已满' : '营建'}</button></div>
-              </div>`;
-        }).join('')}
-          </div>
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>营建</h3><small>消耗资源提升基建</small></div></div>
+        <div class="list">
+          ${FACILITIES.map((f) => {
+      const lv = s.fac[f.key] || 0;
+      const cost = g.buildCost(f.key);
+      const can = lv < f.maxLv && Object.entries(cost).every(([k, v]) => (s.res[k] || 0) >= v);
+      return `<div class="item">
+              <div class="main"><div class="name">${f.name} <span class="pill mute">Lv.${lv}/${f.maxLv}</span></div>
+              <div class="meta">${f.desc}</div>
+              <div class="meta">${Object.entries(cost).map(([k, v]) => `${RES_BY_KEY[k].name} ${v}`).join(' · ')}</div></div>
+              <div class="act"><button class="btn sm ${can ? 'primary' : ''}" data-act="build" data-arg="${f.key}" ${lv >= f.maxLv ? 'disabled' : ''}>${lv >= f.maxLv ? '已满' : '营建'}</button></div>
+            </div>`;
+    }).join('')}
         </div>
       </div>
     </div>`;
@@ -385,8 +872,6 @@ export const UI = {
     const g = this.game; const s = g.save;
     const avail = g.missionsAvailable();
     return `<div class="stack">
-      <div class="panel-head"><h2>任务与派遣</h2><p>正式弟子可承任务与派遣；杂役只在小世界内劳作。</p></div>
-
       <div class="card">
         <div class="card-head"><div class="t"><h3>进行中</h3></div></div>
         <div class="list">
@@ -405,12 +890,12 @@ export const UI = {
       </div>
 
       <div class="card">
-        <div class="card-head"><div class="t"><h3>任务大厅</h3><small>按等级分层</small></div></div>
+        <div class="card-head"><div class="t"><h3>任务大厅</h3><small>山门所接</small></div>
+          <button class="btn sm ghost" data-act="recruit" data-arg="servant">招收杂役</button></div>
         <div class="list">
           ${avail.map((m) => `
             <div class="item"><div class="main"><div class="name">${m.name} <span class="pill mute">${m.lv} 级</span></div>
-            <div class="meta"><span>${m.desc}</span><span>耗时 ${m.days} 日</span><span>要求第 ${m.need} 步</span>
-            <span>奖励 ${Object.entries(m.reward).map(([k, v]) => k === 'gongxian' ? `贡献 ${v}` : `${RES_BY_KEY[k].name} ${v[0]}-${v[1]}`).join(' · ')}</span></div></div>
+            <div class="meta"><span>${m.desc}</span><span>耗时 ${m.days} 日</span><span>要求第 ${m.need} 步</span></div></div>
             <div class="act"><button class="btn sm primary" data-act="mission:start" data-arg="${m.key}">领取</button></div></div>`).join('')}
         </div>
       </div>
@@ -431,12 +916,10 @@ export const UI = {
     const g = this.game; const s = g.save;
     const facs = [['tianshu', '天枢剑宗', '规矩、敬语，暗含倨傲'], ['xuanyin', '玄阴教', '绵软、爱用反问'], ['shangmeng', '万宝商盟', '开口先谈价钱']];
     return `<div class="stack">
-      <div class="panel-head"><h2>大世界</h2><p>云荒东南一片，三家势力互为制衡；宗门位置关键，三方都会来敲门。</p></div>
-
       <div class="card">
         <div class="card-head"><div class="t"><h3>小世界分层</h3><small>已启 ${s.layers} / 10 层</small></div>
           <button class="btn sm primary" data-act="layer:open">开辟第 ${Math.min(10, s.layers + 1)} 层</button></div>
-        <p class="hint" style="margin-bottom:8px">开辟下一层需 ${Object.entries(g.nextLayerCost()).map(([k, v]) => `${RES_BY_KEY[k].name} ${v}`).join(' · ')}；层位越高，可容纳弟子越多、灵气越浓。</p>
+        <p class="hint" style="margin-bottom:8px">开辟下一层需 ${Object.entries(g.nextLayerCost()).map(([k, v]) => `${RES_BY_KEY[k].name} ${v}`).join(' · ')}。</p>
         <div class="list">
           ${LAYERS.map((l) => {
       const on = l.lv <= s.layers;
@@ -447,7 +930,7 @@ export const UI = {
       </div>
 
       <div class="card">
-        <div class="card-head"><div class="t"><h3>三方势力</h3><small>关系分为敌对 / 冷淡 / 中立 / 友善 / 结盟</small></div></div>
+        <div class="card-head"><div class="t"><h3>三方势力</h3><small>敌对 / 冷淡 / 中立 / 友善 / 结盟</small></div></div>
         <div class="list">
           ${facs.map(([k, n, tone]) => {
       const v = s.relations[k] || 0;
@@ -464,12 +947,11 @@ export const UI = {
       </div>
 
       <div class="card">
-        <div class="card-head"><div class="t"><h3>道印</h3></div></div>
+        <div class="card-head"><div class="t"><h3>道印</h3></div><button class="btn sm ghost" data-act="open:temple-seal">祖师殿</button></div>
         <div class="kv" style="font-size:12px">
           <span>已回收碎片 <b>${s.flags.shard || 0} / 3</b></span>
-          <span>终局路径 <b>${s.flags.finalPath ? ({ search: '搜寻第三片', cast: '以宗门之力补铸', shell: '补出一个空壳', mortal: '不再追问' }[s.flags.finalPath] || s.flags.finalPath) : '未定'}</b></span>
+          <span>气运 <b>${s.sect.fortune >= 0 ? '+' : ''}${Math.round(s.sect.fortune)}</b></span>
         </div>
-        <p class="hint" style="margin-top:8px">道印只有三分之一完整，印面纹路断断续续。它让这片土地被天地承认，也记录着宗门气运。</p>
       </div>
     </div>`;
   },
@@ -477,25 +959,20 @@ export const UI = {
   /* ---------- 对战 ---------- */
   pBattle() {
     const g = this.game; const s = g.save;
-    const pool = s.disciples.filter((d) => d.type !== 'servant');
     const atk = s.battle.atk; const def = s.battle.def;
     const list = this.helpers.opponents || [];
+    const team = (ids, kind) => (ids.length
+      ? ids.map((id) => { const d = g.byId(id); return d ? `<div class="item"><div class="main"><div class="name">${esc(d.name)}</div><div class="meta">第${d.step || 0}步 · 战力 ${fmt(g.power(d))}</div></div></div>` : ''; }).join('')
+      : `<div class="empty">尚未设置${kind}编队</div>`);
     return `<div class="stack">
-      <div class="panel-head"><h2>宗门对战</h2><p>必须双方同意才开战。对方同意后由服务端结算，客户端只做过程演示。</p></div>
-
-      <div class="grid g2">
-        <div class="card">
-          <div class="card-head"><div class="t"><h3>进攻编队</h3><small>${atk.length}/5</small></div><button class="btn sm ghost" data-act="team:atk">设置</button></div>
-          <div class="list">${atk.length ? atk.map((id) => { const d = g.byId(id); return d ? `<div class="item"><div class="main"><div class="name">${esc(d.name)}</div><div class="meta">第${d.step || 0}步 · 战力 ${fmt(g.power(d))}</div></div></div>` : ''; }).join('') : '<div class="empty">尚未设置进攻编队</div>'}</div>
-          <p class="hint" style="margin-top:8px">编队总战力 ${fmt(g.teamPower(atk))}</p>
-        </div>
-        <div class="card">
-          <div class="card-head"><div class="t"><h3>防守编队</h3><small>${def.length}/5</small></div><button class="btn sm ghost" data-act="team:def">设置</button></div>
-          <div class="list">${def.length ? def.map((id) => { const d = g.byId(id); return d ? `<div class="item"><div class="main"><div class="name">${esc(d.name)}</div><div class="meta">第${d.step || 0}步 · 战力 ${fmt(g.power(d))}</div></div></div>` : ''; }).join('') : '<div class="empty">尚未设置防守编队</div>'}</div>
-          <p class="hint" style="margin-top:8px">护法堂人员在防守时优先出场。</p>
-        </div>
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>进攻编队</h3><small>${atk.length}/5 · 总战力 ${fmt(g.teamPower(atk))}</small></div><button class="btn sm ghost" data-act="team:atk">设置</button></div>
+        <div class="list">${team(atk, '进攻')}</div>
       </div>
-
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>防守编队</h3><small>${def.length}/5 · 护法堂优先进场</small></div><button class="btn sm ghost" data-act="team:def">设置</button></div>
+        <div class="list">${team(def, '防守')}</div>
+      </div>
       <div class="card">
         <div class="card-head"><div class="t"><h3>邀约</h3><small>${g.canChallenge() ? '可以发出邀约' : '冷却中'}</small></div></div>
         <div class="list">
@@ -506,13 +983,12 @@ export const UI = {
         : `<div class="empty"><strong>暂无对手</strong>榜单尚未同步，先经营一段时间。</div>`}
         </div>
       </div>
-
       <div class="card">
         <div class="card-head"><div class="t"><h3>战报</h3><small>${s.stats.wins} 胜 ${s.stats.losses} 负</small></div></div>
         <div class="list">
           ${s.battle.reports.length ? s.battle.reports.slice(0, 10).map((r) => `
             <div class="item"><div class="main"><div class="name">${r.win ? '<span style="color:var(--seal)">胜</span>' : '<span style="color:var(--jade)">负</span>'} ${esc(r.opp)}</div>
-            <div class="meta"><span>我方战力 ${r.myPower}</span><span>对方 ${r.oppPower}</span><span>开宗 ${Math.floor(r.day / 360) + 1} 年</span>${r.reward ? `<span>声望 +${r.reward}</span>` : ''}</div></div></div>`).join('')
+            <div class="meta"><span>我方 ${r.myPower}</span><span>对方 ${r.oppPower}</span>${r.reward ? `<span>声望 +${r.reward}</span>` : ''}</div></div></div>`).join('')
         : '<div class="empty">尚无战报。</div>'}
         </div>
       </div>
@@ -523,13 +999,12 @@ export const UI = {
   pRank() {
     const list = this.helpers.ranking || [];
     return `<div class="stack">
-      <div class="panel-head"><h2>赛季榜单</h2><p>全服每小时刷新一次。只展示公开字段，不提供查看他人宗门内部的入口。</p></div>
       <div class="card">
-        <div class="card-head"><div class="t"><h3>赛季 · 声望排序</h3></div><button class="btn sm" data-act="rank:refresh">刷新</button></div>
+        <div class="card-head"><div class="t"><h3>赛季 · 声望排序</h3><small>每小时刷新</small></div><button class="btn sm" data-act="rank:refresh">刷新</button></div>
         ${list.length ? `<div class="list">${list.map((r, i) => `
-          <div class="item"><div style="width:26px;font-family:var(--f-head);color:var(--ink-3)">${i + 1}</div>
+          <div class="item"><div style="width:24px;font-family:var(--f-head);color:var(--ink-3)">${i + 1}</div>
           <div class="main"><div class="name">${esc(r.sect_name)}</div>
-          <div class="meta"><span>祖师 ${esc(r.founder_name || '—')}</span><span>声望 ${r.renown}</span><span>最高 ${r.max_step} 步</span><span>弟子 ${r.disciple_count}</span></div></div></div>`).join('')}</div>`
+          <div class="meta"><span>${esc(r.founder_name || '—')}</span><span>声望 ${r.renown}</span><span>最高 ${r.max_step} 步</span><span>弟子 ${r.disciple_count}</span></div></div></div>`).join('')}</div>`
         : '<div class="empty"><strong>榜单为空</strong>还没有宗门留下姓名。</div>'}
       </div>
     </div>`;
@@ -538,15 +1013,19 @@ export const UI = {
   /* ---------- 宗门史 ---------- */
   pChronicle() {
     const s = this.game.save;
+    const kindName = { auto: '自决', memorial: '批复', story: '剧情', event: '异动' };
     return `<div class="stack">
-      <div class="panel-head"><h2>宗门史</h2><p>已写入 ${s.story.done.length} / ${STORY_NODES.length} 个关键节点。已结算的选择不可撤销。</p></div>
       ${s.ended ? `<div class="card" style="border-color:var(--seal)"><div class="card-head"><div class="t"><h3>终局 · ${ENDINGS[s.ended].name}</h3></div></div><p>${ENDINGS[s.ended].text}</p></div>` : ''}
       <div class="card">
+        <div class="card-head"><div class="t"><h3>留痕</h3><small>自决与批复皆在此</small></div><span class="pill mute">${s.story.log.length}</span></div>
         <div class="list">
-          ${s.story.log.length ? s.story.log.map((l) => `
-            <div class="item"><div class="main"><div class="name">${esc(l.title)} <span class="pill mute">${esc(l.label)}</span></div>
-            <div class="meta">${esc(l.result)}</div>
-            <div class="meta">开宗 ${Math.floor(l.day / 360) + 1} 年 · 第 ${l.day % 360} 日</div></div></div>`).join('')
+          ${s.story.log.length ? s.story.log.slice(0, 60).map((l) => `
+            <div class="item"><div class="main">
+              <div class="name" style="font-size:13px">${esc(l.title)} <span class="pill ${l.kind === 'auto' ? 'mute' : 'gold'}">${kindName[l.kind] || '史'}</span>
+                <span class="pill mute">${esc(l.label || '')}</span></div>
+              <div class="meta">${esc(l.result || '')}</div>
+              <div class="meta">开宗 ${Math.floor(l.day / 360) + 1} 年 · 第 ${l.day % 360} 日 · ${l.by === '破天阁' ? '破天阁自决' : '祖师批复'}</div>
+            </div></div>`).join('')
         : '<div class="empty"><strong>史书尚白</strong>随着宗门发展，决断会一条条写进来。</div>'}
         </div>
       </div>
@@ -566,29 +1045,43 @@ export const UI = {
   /* ---------- 设置 ---------- */
   pSettings() {
     const g = this.game; const s = g.save;
+    const qNames = ['极简', '流畅', '标准', '精细'];
     return `<div class="stack">
-      <div class="panel-head"><h2>设置</h2><p>界面偏好只保存在本地；时间流速属于存档级设置，跨端同步。</p></div>
       <div class="card">
-        <div class="card-head"><div class="t"><h3>自动化</h3></div></div>
+        <div class="card-head"><div class="t"><h3>画质</h3><small>按设备能力选择</small></div></div>
+        <div class="q-grid">
+          ${qNames.map((n, i) => `<button class="q-btn ${this.gfx.q === i ? 'is-on' : ''}" data-act="gfx:q" data-arg="${i}">${n}<small>${['最省电', '流畅', '默认', '最细'][i]}</small></button>`).join('')}
+        </div>
+        <div class="toggle-row" style="margin-top:8px">
+          <div><div class="l-name">减少动态效果</div><div class="l-desc">停止循环动画，保留静态明暗与状态提示</div></div>
+          <button class="switch ${this.gfx.motion ? '' : 'on'}" data-act="gfx:motion"></button>
+        </div>
+        <p class="hint" style="margin-top:6px">帧率连续偏低时会自动降一档，功能不受影响。</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>自动化</h3><small>更细的自决范围在破天阁</small></div>
+          <button class="btn sm ghost" data-act="panel" data-arg="autonomy">破天阁</button></div>
         <div class="list">
-          <div class="item"><div class="main"><div class="name">自动突破</div><div class="meta">修为满后由弟子自行尝试（成功率较低）</div></div>
-            <div class="act"><button class="btn sm ${s.settings.autoBreak ? 'primary' : ''}" data-act="toggle" data-arg="autoBreak">${s.settings.autoBreak ? '已开' : '已关'}</button></div></div>
-          <div class="item"><div class="main"><div class="name">自动招收</div><div class="meta">每六十日自动收一名杂役，需有存粮</div></div>
-            <div class="act"><button class="btn sm ${s.settings.autoRecruit ? 'primary' : ''}" data-act="toggle" data-arg="autoRecruit">${s.settings.autoRecruit ? '已开' : '已关'}</button></div></div>
+          <div class="toggle-row"><div><div class="l-name">自动突破</div><div class="l-desc">前三步自然晋级，第三步起仍需祖师安排</div></div>
+            <button class="switch ${s.settings.autoBreak ? 'on' : ''}" data-act="toggle" data-arg="autoBreak"></button></div>
+          <div class="toggle-row"><div><div class="l-name">自动招收</div><div class="l-desc">阁中按策略自行招收杂役</div></div>
+            <button class="switch ${s.settings.autoRecruit ? 'on' : ''}" data-act="toggle" data-arg="autoRecruit"></button></div>
         </div>
       </div>
+
       <div class="card">
         <div class="card-head"><div class="t"><h3>存档</h3></div></div>
         <div class="kv" style="font-size:12px">
-          <span>槽位 <b>${s.slot + 1}</b></span><span>数据版本 <b>v${s.v}</b></span>
-          <span>修订号 <b>${s.revision}</b></span><span>开宗 <b>${Math.floor(s.day / 360) + 1} 年</b></span>
+          <span>槽位 <b>${s.slot + 1}</b></span><span>修订号 <b>${s.revision}</b></span>
+          <span>开宗 <b>${Math.floor(s.day / 360) + 1} 年</b></span>
         </div>
         <div class="row" style="margin-top:12px;flex-wrap:wrap">
-          <button class="btn primary" data-act="save:now">立即保存到云端</button>
-          <button class="btn ghost" data-act="panel" data-arg="slots">切换存档</button>
+          <button class="btn primary" data-act="save:now">立即保存</button>
           <button class="btn ghost" data-act="signout">退出登录</button>
         </div>
       </div>
+
       <div class="card">
         <div class="card-head"><div class="t"><h3>账号</h3></div></div>
         ${(() => {
@@ -605,10 +1098,30 @@ export const UI = {
           <p class="hint">账号由宗门管理方统一开立，站点不提供手机号、邮箱等自助注册入口。</p>`;
         })()}
       </div>
+
+      ${(() => {
+        const a = (this.helpers && this.helpers.account) || {};
+        if (a.role !== 'admin' || !this.helpers.setFlag) return '';
+        const on = (k) => (this.flags[k] ? 'on' : '');
+        return `<div class="card">
+          <div class="card-head"><div class="t"><h3>灰度与回退</h3><small>模块级，仅本机生效</small></div></div>
+          <div class="list">
+            <div class="toggle-row"><div><div class="l-name">宗门场景主页</div>
+              <div class="l-desc">关闭后回退到旧的卡片看板</div></div>
+              <button class="switch ${on('sceneHome')}" data-act="flag:sceneHome"></button></div>
+            <div class="toggle-row"><div><div class="l-name">待处理提示模式</div>
+              <div class="l-desc">关闭后事件回到旧的阻断弹窗</div></div>
+              <button class="switch ${on('pendingMode')}" data-act="flag:pendingMode"></button></div>
+          </div>
+          <p class="hint">两个开关都保留旧路径，出问题可立即回滚；正式灰度按账号白名单与比例下发。</p>
+        </div>`;
+      })()}
+
       <div class="card">
         <div class="card-head"><div class="t"><h3>关于</h3></div></div>
-        <p class="hint">《破天宗》网页版 · 依据《破天宗修仙模拟器游戏设计开发文档 V1.3》实现。<br>
-        掌柜的话：这里没有自由交易市场，也没有资源换成现实价值的通道；后台不改数值，只发兑换码。</p>
+        <p class="hint">《破天宗》网页版 · 依据设计文档 V1.4 第 28 章改造：主页为宗门场景，事件不夺焦点，
+          日常由破天阁自治，重大事项进祖师殿。<br>
+          掌柜的话：这里没有自由交易市场，也没有资源换成现实价值的通道；后台不改数值，只发兑换码。</p>
       </div>
     </div>`;
   },
@@ -619,54 +1132,108 @@ export const UI = {
     if (!t) return;
     const act = t.dataset.act; const arg = t.dataset.arg || '';
     const g = this.game;
+    const done = (rendered) => { if (rendered !== true) this.render(); this.helpers.autoSave && this.helpers.autoSave(); };
+
     switch (act) {
       case 'panel': this.setPanel(arg); break;
-      case 'filter': {
-        const [k, v] = arg.split(':');
-        this.discFilter[k] = v; this.renderPanel(); break;
+      case 'board:open': {
+        const b = BUILDINGS.find((x) => x.key === arg);
+        if (b) this.setPanel(b.panel === 'temple' ? 'temple' : b.panel);
+        break;
       }
+      case 'flag:sceneHome':
+      case 'flag:pendingMode': {
+        const k = act.slice(5);
+        const next = !this.flags[k];
+        this.flags[k] = next;
+        this.helpers.setFlag(k, next);
+        this.toast(next ? '已切到新版' : '已回退旧版，刷新后仍生效');
+        break;
+      }
+      case 'filter': { const [k, v] = arg.split(':'); this.discFilter[k] = v; this.renderPanel(); break; }
+      case 'pending:read': {
+        markSeen(g, (this._matters || []).map((m) => m.ref));
+        this.syncBadges(this._matters || []);
+        this.renderPanel(); this.helpers.autoSave && this.helpers.autoSave();
+        this.toast('已全部标记为已读');
+        break;
+      }
+      case 'msg:filter': this.msgFilter = arg; this.renderPanel(); break;
+      case 'msg:read': this.markNewsSeen(); this.syncBadges(this._matters || []); this.renderPanel(); this.toast('消息已全部已读'); break;
+      case 'matter:go': {
+        const m = (this._matters || []).find((x) => x.ref === arg);
+        if (!m) break;
+        if (m.level === 3) { this.openTemple(); break; }
+        this.setPanel(m.act && m.act.arg === 'temple' ? 'pending' : (m.act ? m.act.arg : 'pending'));
+        break;
+      }
+      case 'matter:snooze': {
+        snooze(g, arg);
+        this.toast('已暂缓四十五日');
+        this.syncScene(); this.renderPanel();
+        this.helpers.autoSave && this.helpers.autoSave();
+        break;
+      }
+      case 'memo:pick': {
+        const [ref, idx] = arg.split('|');
+        this.applyMemorial(ref, Number(idx));
+        break;
+      }
+      case 'pol:stance': {
+        g.setPolicy({ stance: arg });
+        this.syncScene(); this.renderPanel(); this.helpers.autoSave && this.helpers.autoSave();
+        if (this.helpers.syncPolicy) this.helpers.syncPolicy(g.save.policy);
+        this.toast('已改为' + (STANCES.find((s) => s.key === arg) || {}).name);
+        break;
+      }
+      case 'pol:area': {
+        const p = g.policy();
+        g.setPolicy({ areas: { [arg]: p.areas[arg] === false } });
+        this.renderPanel(); this.helpers.autoSave && this.helpers.autoSave();
+        if (this.helpers.syncPolicy) this.helpers.syncPolicy(g.save.policy);
+        break;
+      }
+      case 'pol:law': {
+        const p = g.policy();
+        g.setPolicy({ laws: { [arg]: !p.laws[arg] } });
+        this.renderPanel();
+        if (document.getElementById('view-temple').classList.contains('is-active')) this.renderTemple();
+        this.helpers.autoSave && this.helpers.autoSave();
+        if (this.helpers.syncPolicy) this.helpers.syncPolicy(g.save.policy);
+        break;
+      }
+      case 'open:temple-law': this.templeTab = 'law'; this.openTemple(); break;
+      case 'open:temple-seal': this.templeTab = 'seal'; this.openTemple(); break;
+      case 'gfx:q': this.gfx.q = Number(arg); this.saveGfx(); this.applyGfx(); this.renderPanel(); break;
+      case 'gfx:motion': this.gfx.motion = !this.gfx.motion; this.saveGfx(); this.applyGfx(); this.renderPanel(); break;
       case 'story:open': this.openStory(arg); break;
       case 'evt:open': this.openEvent(); break;
       case 'recruit': this.helpers.recruit(arg); break;
-      case 'exam': {
-        const r = g.batchExam();
-        this.toast(r.msg); this.render(); if (this.helpers.autoSave) this.helpers.autoSave();
-        break;
-      }
+      case 'exam': { const r = g.batchExam(); this.toast(r.msg); done(); break; }
       case 'disc:detail': this.openDisciple(Number(arg)); break;
-      case 'disc:break': {
-        const r = g.tryBreak(Number(arg));
-        this.toast(r.msg); this.render(); this.helpers.autoSave && this.helpers.autoSave();
-        break;
-      }
+      case 'disc:break': { const r = g.tryBreak(Number(arg)); this.toast(r.msg); done(); break; }
       case 'disc:convert': this.openConvert(Number(arg)); break;
       case 'disc:back': {
         const d = g.byId(Number(arg));
         if (d) { d.type = 'formal'; d.step = d.prevStep || 4; d.state = 'cultivate'; d.staffInst = null; }
-        this.render(); this.helpers.autoSave && this.helpers.autoSave(); break;
+        done(); break;
       }
-      case 'build': {
-        const r = g.build(arg); this.toast(r.msg); this.render(); this.helpers.autoSave && this.helpers.autoSave(); break;
-      }
+      case 'build': { const r = g.build(arg); this.toast(r.msg); done(); break; }
       case 'seat:elect': {
         const [inst, i] = arg.split(':');
         const r = g.autoElect(inst, i);
         this.toast(r.msg);
         if (r.ranking) this.openElectResult(inst, r.ranking);
-        this.render(); this.helpers.autoSave && this.helpers.autoSave();
-        break;
+        done(); break;
       }
-      case 'seat:assign': {
-        const [inst, i] = arg.split(':');
-        this.openAssign(inst, Number(i)); break;
-      }
+      case 'seat:assign': { const [inst, i] = arg.split(':'); this.openAssign(inst, Number(i)); break; }
       case 'seat:vacate': {
         const [inst, i] = arg.split(':');
         const id = g.save.posts[inst][Number(i)];
         g.vacate(inst, Number(i));
         const d = g.byId(id);
         if (d && d.type === 'staff') d.state = 'idle';
-        this.toast('已卸任'); this.render(); this.helpers.autoSave && this.helpers.autoSave(); break;
+        this.toast('已卸任'); done(); break;
       }
       case 'mission:start': this.openMission(arg); break;
       case 'exp:start': this.openExpedition(arg); break;
@@ -675,22 +1242,49 @@ export const UI = {
       case 'battle:go': this.helpers.battle(arg); break;
       case 'rank:refresh': this.helpers.refreshRank(); break;
       case 'toggle': {
-        g.save.settings[arg] = !g.save.settings[arg]; this.render(); this.helpers.autoSave && this.helpers.autoSave(); break;
+        g.save.settings[arg] = !g.save.settings[arg];
+        this.renderPanel(); this.helpers.autoSave && this.helpers.autoSave(); break;
       }
       case 'save:now': this.helpers.forceSave(); break;
       case 'signout': this.helpers.signOut(); break;
       case 'passwd': this.helpers.changePass && this.helpers.changePass(); break;
       case 'sessions': this.helpers.sessions && this.helpers.sessions(); break;
       case 'admin': this.helpers.openAdmin && this.helpers.openAdmin(); break;
-      case 'dip:gift': { const r = g.diplomacy(arg, 'gift'); this.toast(r.msg); this.render(); this.helpers.autoSave && this.helpers.autoSave(); break; }
-      case 'dip:press': { const r = g.diplomacy(arg, 'press'); this.toast(r.msg); this.render(); this.helpers.autoSave && this.helpers.autoSave(); break; }
-      case 'layer:open': { const r = g.openNextLayer(); this.toast(r.msg); this.render(); this.helpers.autoSave && this.helpers.autoSave(); break; }
-      case 'disc:heir': { const r = g.designateHeir(Number(arg)); this.toast(r.msg); this.render(); this.helpers.autoSave && this.helpers.autoSave(); break; }
+      case 'dip:gift': { const r = g.diplomacy(arg, 'gift'); this.toast(r.msg); done(); break; }
+      case 'dip:press': { const r = g.diplomacy(arg, 'press'); this.toast(r.msg); done(); break; }
+      case 'layer:open': { const r = g.openNextLayer(); this.toast(r.msg); done(); break; }
+      case 'disc:heir': { const r = g.designateHeir(Number(arg)); this.toast(r.msg); done(); break; }
       default: break;
     }
   },
 
-  /* ---------- 弹窗基础 ---------- */
+  applyMemorial(ref, idx) {
+    const list = memorials(this.game);
+    const m = list.find((x) => x.ref === ref);
+    if (!m) return;
+    const opt = m.options[idx];
+    if (!opt || opt.disabled) return;
+    const res = opt.run() || {};
+    if (!res.ok) { this.toast(res.msg || '未能施行'); return; }
+    this.game.chronicle('memorial', m.title, opt.label, res.msg || opt.detail || '');
+    this.game.msg(`批复：${m.title} · ${opt.label}`, 'story');
+    this.game.matterState && (this.game.matterState.seen[ref] = this.game.save.day);
+    if (this.helpers.matterAct) this.helpers.matterAct(ref, 'approve', opt.label);
+    this.toast(res.msg || '已批复');
+    this.helpers.autoSave && this.helpers.autoSave();
+    this.syncScene();
+    if (res.nav) { this.backToScene(); this.setPanel(res.nav); return; }
+    this.renderTemple();
+  },
+
+  saveGfx() {
+    try { localStorage.setItem(GFX_KEY, JSON.stringify(this.gfx)); } catch (e) { /* ignore */ }
+  },
+  applyGfx() {
+    if (this.scene) this.scene.setQuality(this.gfx.q, this.gfx.motion);
+  },
+
+  /* ---------- 弹窗基础（只用于不可逆确认、冲突、会话异常） ---------- */
   modal({ title, sub, body, actions = [], onMount }) {
     const root = document.getElementById('modalRoot');
     root.innerHTML = `<div class="modal-mask"><div class="modal">
@@ -712,7 +1306,7 @@ export const UI = {
     return close;
   },
 
-  /* ---------- 剧情 ---------- */
+  /* ---------- 剧情与异动（不再自动弹出，只从待处理/祖师殿进入） ---------- */
   openStory(nodeId) {
     const node = STORY_BY_ID[nodeId];
     if (!node) return;
@@ -721,20 +1315,15 @@ export const UI = {
       title: node.title,
       sub: `第${node.act}幕 · 开宗 ${Math.floor(g.save.day / 360) + 1} 年`,
       body: `<div class="story-text">${esc(node.text)}</div>
-        ${node.options.map((o, i) => `<button class="opt" data-oi="${i}">${esc(o.label)}</button>`).join('')}`,
-      actions: [{ label: '暂不处理', cls: 'ghost', onClick: (close) => { g.save.story.pending.push(nodeId); close(); this.render(); } }],
+        ${node.options.map((o, i) => `<button class="opt" data-oi="${i}">${esc(o.label)}<span class="r">${esc(o.result)}</span></button>`).join('')}`,
+      actions: [{ label: '搁置', cls: 'ghost', onClick: (close) => close() }],
       onMount: (root, close) => {
         root.querySelectorAll('[data-oi]').forEach((b) => b.addEventListener('click', () => {
           const idx = Number(b.dataset.oi);
           g.resolveStory(nodeId, idx);
+          if (this.helpers.matterAct) this.helpers.matterAct(`story:${nodeId}`, 'approve', node.options[idx].label);
           close();
-          const opt = node.options[idx];
-          this.modal({
-            title: node.title,
-            sub: '其结果已写入宗门史',
-            body: `<div class="story-text">${esc(opt.result)}</div>`,
-            actions: [{ label: '记下了', cls: 'primary', onClick: (c2) => c2() }],
-          });
+          this.toast('已批，结果写入宗门史');
           this.render();
           this.helpers.autoSave && this.helpers.autoSave();
         }));
@@ -750,15 +1339,15 @@ export const UI = {
       title: ev.name,
       sub: '大世界异动',
       body: `<div class="story-text">${esc(ev.text)}</div>
-        ${ev.options.map((o, i) => `<button class="opt" data-oi="${i}">${esc(o.label)}<span class="r">结果在结算时才显露</span></button>`).join('')}`,
+        ${ev.options.map((o, i) => `<button class="opt" data-oi="${i}">${esc(o.label)}<span class="r">${esc(o.result)}</span></button>`).join('')}`,
       actions: [{ label: '稍后处置', cls: 'ghost', onClick: (c) => c() }],
       onMount: (root, close) => {
         root.querySelectorAll('[data-oi]').forEach((b) => b.addEventListener('click', () => {
           const idx = Number(b.dataset.oi);
-          const res = ev.options[idx].result;
           g.resolveEvent(idx);
+          if (this.helpers.matterAct) this.helpers.matterAct(`evt:${ev.key}`, 'approve', ev.options[idx].label);
           close();
-          this.modal({ title: ev.name, body: `<div class="story-text">${esc(res)}</div>`, actions: [{ label: '知道了', cls: 'primary', onClick: (c2) => c2() }] });
+          this.toast('已处置，结果写入宗门史');
           this.render();
           this.helpers.autoSave && this.helpers.autoSave();
         }));
@@ -814,7 +1403,7 @@ export const UI = {
         <div class="row" style="flex-wrap:wrap">
           ${techList.map((t) => `<button class="btn sm ${d.tech === t.key ? 'primary' : ''}" data-tech="${t.key}">${t.name}（${t.grade}品）</button>`).join('')}
         </div>
-        <p class="hint" style="margin-top:8px">更换功法完全保留修为进度，只改变效率、心魔抗性、突破率与战力。当前境界可装配 ${techList.length} 部。</p>
+        <p class="hint" style="margin-top:8px">更换功法完全保留修为进度，只改变效率、心魔抗性、突破率与战力。</p>
       </div>
 
       <div class="fieldset" style="margin-top:12px"><h4>履历</h4>
@@ -845,8 +1434,8 @@ export const UI = {
     if (!d) return;
     this.modal({
       title: '转职',
-      sub: '转入护法堂或长老会将脱离弟子身份；两个机构只能择一，不得兼任。',
-      body: `<p class="hint">该弟子将不再参加晋升考核，也不计入弟子人数统计；修为可继续增长。</p>`,
+      sub: '转入护法堂或长老会将脱离弟子身份；两个机构只能择一。',
+      body: '<p class="hint">该弟子将不再参加晋升考核，不计入弟子人数统计；修为可继续增长。</p>',
       actions: [
         { label: '转入护法堂', cls: 'primary', onClick: (c) => { const r = g.convert(id, 'hufatang'); this.toast(r.msg); c(); this.render(); this.helpers.autoSave && this.helpers.autoSave(); } },
         { label: '转入长老会', cls: 'primary', onClick: (c) => { const r = g.convert(id, 'zhanglaohui'); this.toast(r.msg); c(); this.render(); this.helpers.autoSave && this.helpers.autoSave(); } },
@@ -968,3 +1557,5 @@ export const UI = {
     });
   },
 };
+
+export { BUILDING_NAMES };

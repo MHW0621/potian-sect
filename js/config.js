@@ -4,6 +4,35 @@
 
 export const VERSION = 1;
 
+/* ---------- V1.4 灰度开关（模块级，可按账号白名单灰度） ----------
+ * sceneHome   true = 主页走宗门场景；false = 回退旧的卡片看板
+ * pendingMode true = 事件进待处理；false = 回退旧的阻断弹窗
+ * whitelist 命中即强制开启；percent 为按账号哈希的灰度比例（0-100）。
+ */
+export const FLAGS = {
+  sceneHome: { def: true, whitelist: [], percent: 100 },
+  pendingMode: { def: true, whitelist: [], percent: 100 },
+};
+
+export function hashBucket(str) {
+  let h = 2166136261;
+  const s = String(str || '');
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+  return Math.abs(h) % 100;
+}
+
+export function resolveFlag(spec, account) {
+  if (!spec) return true;
+  const uid = String((account && (account.username || account.uid || account.id)) || '');
+  const wl = spec.whitelist || [];
+  if (uid && wl.indexOf(uid) >= 0) return true;
+  if (wl.indexOf('*') >= 0) return true;
+  const pct = typeof spec.percent === 'number' ? spec.percent : 100;
+  if (pct >= 100) return spec.def !== false;
+  if (pct <= 0) return false;
+  return hashBucket(uid) < pct;
+}
+
 /* 时间：1 倍速下每 TICK_MS 毫秒推进 DAYS_PER_TICK 个游戏日 */
 export const TICK_MS = 250;
 export const DAYS_PER_TICK = 1.5;

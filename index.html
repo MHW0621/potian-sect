@@ -57,7 +57,7 @@
   </div>
 </section>
 
-<!-- ============ 首次改密（管理员开号后强制） ============ -->
+<!-- ============ 首次改密 ============ -->
 <section id="view-pass" class="view">
   <div class="auth-wrap">
     <div class="brand">
@@ -81,7 +81,7 @@
   </div>
 </section>
 
-<!-- ============ 管理台（仅管理员） ============ -->
+<!-- ============ 管理台 ============ -->
 <section id="view-admin" class="view">
   <div class="admin-wrap">
     <header class="slots-head">
@@ -107,20 +107,18 @@
   </div>
 </section>
 
-<!-- ============ 游戏主界面 ============ -->
+<!-- ============ 游戏主界面：以宗门场景为常驻容器 ============ -->
 <section id="view-game" class="view">
   <header class="topbar">
-    <button class="icon-btn only-mobile" id="btnDrawer" aria-label="导航">☰</button>
+    <button class="icon-btn only-mobile" id="btnRail" aria-label="导航">☰</button>
     <div class="sect-id">
       <strong id="hSect">破天宗</strong>
       <span id="hFounder">祖师</span>
     </div>
     <div class="hstats">
-      <span class="pill" id="hStage">第一幕</span>
+      <span class="st">开宗 <b id="hYear">1</b> 年</span>
       <span class="st">声望 <b id="hRenown">0</b></span>
-      <span class="st">气运 <b id="hFortune">0</b></span>
-      <span class="st hide-sm" id="hDisc">弟子 0</span>
-      <span class="st hide-sm" id="hDate">开宗 1 年</span>
+      <span class="st hide-sm">灵石 <b id="hStone">0</b></span>
     </div>
     <div class="speed" id="speedBox" role="group" aria-label="时间流速">
       <button data-speed="0" title="暂停">止</button>
@@ -128,35 +126,90 @@
       <button data-speed="2" title="二倍速">二</button>
       <button data-speed="5" title="五倍速">五</button>
     </div>
+    <button class="top-btn" id="btnPending" aria-label="待处理">
+      <span>待处理</span><i class="dot" id="pendingDot" hidden></i>
+    </button>
+    <button class="top-btn" id="btnMsg" aria-label="消息中心">
+      <span>消息</span><i class="dot" id="msgDot" hidden></i>
+    </button>
   </header>
 
   <div class="notice-bar" id="noticeBar" hidden></div>
 
-  <nav class="sidenav" id="sidenav">
-    <button class="nav-item is-on" data-panel="overview"><i>总</i><span>宗门总览</span></button>
-    <button class="nav-item" data-panel="disciples"><i>徒</i><span>弟子名录</span></button>
-    <button class="nav-item" data-panel="org"><i>阁</i><span>机构席位</span></button>
-    <button class="nav-item" data-panel="workshop"><i>坊</i><span>资源工坊</span></button>
-    <button class="nav-item" data-panel="tasks"><i>务</i><span>任务派遣</span></button>
-    <button class="nav-item" data-panel="world"><i>界</i><span>大世界</span></button>
-    <button class="nav-item" data-panel="battle"><i>战</i><span>宗门对战</span></button>
-    <button class="nav-item" data-panel="rank"><i>榜</i><span>赛季榜单</span></button>
-    <button class="nav-item" data-panel="chronicle"><i>史</i><span>宗门史</span></button>
-    <button class="nav-item" data-panel="settings"><i>设</i><span>设置</span></button>
-    <div class="nav-foot">
-      <button class="nav-item mini" id="btnRedeem"><i>兑</i><span>兑换</span></button>
-      <button class="nav-item mini" id="btnBackSlots"><i>返</i><span>切换存档</span></button>
-    </div>
-  </nav>
+  <div class="game-body">
+    <nav class="rail" id="rail" aria-label="宗门导航">
+      <div class="rail-grp">
+        <span class="rail-t">场景</span>
+        <button class="rail-item is-on" data-panel="scene"><i>山</i><span>宗门场景</span></button>
+        <button class="rail-item" data-panel="temple"><i>殿</i><span>祖师殿</span><b class="rail-badge" id="templeBadge" hidden></b></button>
+      </div>
+      <div class="rail-grp">
+        <span class="rail-t">机构</span>
+        <button class="rail-item" data-panel="disciples"><i>徒</i><span>弟子名录</span></button>
+        <button class="rail-item" data-panel="org"><i>阁</i><span>机构席位</span></button>
+        <button class="rail-item" data-panel="workshop"><i>坊</i><span>资源工坊</span></button>
+      </div>
+      <div class="rail-grp">
+        <span class="rail-t">事务</span>
+        <button class="rail-item" data-panel="pending"><i>待</i><span>待处理</span><b class="rail-badge" id="pendingBadge" hidden></b></button>
+        <button class="rail-item" data-panel="messages"><i>信</i><span>消息中心</span><b class="rail-badge" id="msgBadge" hidden></b></button>
+        <button class="rail-item" data-panel="autonomy"><i>议</i><span>破天阁</span></button>
+        <button class="rail-item" data-panel="tasks"><i>务</i><span>任务派遣</span></button>
+        <button class="rail-item" data-panel="chronicle"><i>史</i><span>宗门史</span></button>
+      </div>
+      <div class="rail-grp">
+        <span class="rail-t">外部</span>
+        <button class="rail-item" data-panel="world"><i>界</i><span>大世界</span></button>
+        <button class="rail-item" data-panel="battle"><i>战</i><span>宗门对战</span></button>
+        <button class="rail-item" data-panel="rank"><i>榜</i><span>赛季榜单</span></button>
+        <button class="rail-item" data-panel="settings"><i>设</i><span>设置</span></button>
+      </div>
+      <div class="rail-foot">
+        <button class="rail-item mini" id="btnRedeem"><i>兑</i><span>兑换</span></button>
+        <button class="rail-item mini" id="btnBackSlots"><i>返</i><span>切换存档</span></button>
+      </div>
+    </nav>
 
-  <main class="stage" id="stage"></main>
+    <main class="scene-stage" id="sceneStage">
+      <canvas id="sceneCanvas" aria-label="宗门场景：山体十层，山脚破天城"></canvas>
+      <div class="scene-overlay" id="sceneOverlay"></div>
+      <div class="scene-hint" id="sceneHint">选一处建筑，再点一次进入</div>
+    </main>
+  </div>
 
-  <aside class="msgbox">
-    <div class="msg-head"><span>宗门消息</span><button class="icon-btn" id="btnClearMsg" title="清空">×</button></div>
-    <ul id="msgList"></ul>
+  <!-- 单例抽屉：所有功能面板都叠在场景之上 -->
+  <aside class="panel" id="panel" aria-hidden="true">
+    <header class="pn-head">
+      <div class="t">
+        <h2 id="panelTitle">宗门</h2>
+        <p id="panelSub"></p>
+      </div>
+      <button class="icon-btn" id="panelClose" aria-label="收起">×</button>
+    </header>
+    <div class="pn-body" id="panelBody"></div>
   </aside>
 
-  <div class="drawer-mask" id="drawerMask"></div>
+  <div class="rail-mask" id="railMask"></div>
+</section>
+
+<!-- ============ 祖师殿（独立页面） ============ -->
+<section id="view-temple" class="view">
+  <div class="temple-wrap">
+    <header class="temple-head">
+      <div>
+        <p class="sub" id="templeSect">破天宗</p>
+        <h2>祖师殿</h2>
+        <p class="sub">重大事项止于此。一次陈列三件，逐件批阅。</p>
+      </div>
+      <button class="btn ghost" id="btnTempleBack">回场景</button>
+    </header>
+    <div class="tabs" id="templeTabs">
+      <button class="tab is-on" data-ttab="memo">奏疏</button>
+      <button class="tab" data-ttab="law">法度</button>
+      <button class="tab" data-ttab="seal">道印</button>
+    </div>
+    <div id="templeStage"></div>
+  </div>
 </section>
 
 <div id="modalRoot"></div>

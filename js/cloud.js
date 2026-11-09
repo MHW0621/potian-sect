@@ -178,12 +178,14 @@ export async function loadSave(slot) {
   return data.row;
 }
 
-/* 写入：带修订号校验。冲突返回 { conflict: true } */
-export async function putSave(save, expectedRevision) {
+/* 写入：带修订号校验。冲突返回 { conflict: true }
+ * extra 仅在本次请求中附加（例如待处理镜像），不写回本地存档对象。 */
+export async function putSave(save, expectedRevision, extra) {
+  const payload = extra ? Object.assign({}, save, extra) : save;
   const data = await call('save_put', {
     p_token: token(),
     p_slot: save.slot,
-    p_data: save,
+    p_data: payload,
     p_expected: expectedRevision == null ? null : Number(expectedRevision),
   });
   if (!data || !data.ok) {
@@ -243,6 +245,38 @@ export function logEvent(module, action, detail) {
   call('log_append', {
     p_token: token(), p_module: module, p_action: action, p_detail: detail || {},
   }).catch(() => {});
+}
+
+/* ---------- 场景与待处理（V1.4） ---------- */
+export async function sceneState(slot) {
+  try {
+    const d = await call('scene_state', { p_token: token(), p_slot: slot });
+    return d && d.ok ? d : null;
+  } catch (e) { return null; }
+}
+
+export async function pendingList(slot) {
+  try {
+    const d = await call('pending_list', { p_token: token(), p_slot: slot });
+    return d && d.ok ? d : null;
+  } catch (e) { return null; }
+}
+
+/* 事项处置：携带请求编号，重复提交由服务端幂等返回 */
+export async function matterAct(slot, reqId, ref, action, note) {
+  try {
+    const d = await call('matter_act', {
+      p_token: token(), p_slot: slot, p_req: reqId, p_ref: ref, p_action: action, p_note: note || null,
+    });
+    return d || { ok: false };
+  } catch (e) { return { ok: false }; }
+}
+
+export async function policySet(slot, patch) {
+  try {
+    const d = await call('policy_set', { p_token: token(), p_slot: slot, p_patch: patch });
+    return d || { ok: false };
+  } catch (e) { return { ok: false }; }
 }
 
 /* ---------- 管理员 ---------- */

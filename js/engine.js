@@ -119,6 +119,16 @@ export class Game {
       flags: {},
       stats: { recruited: 0, broke: 0, wins: 0, losses: 0, peakStep: 1 },
       settings: { autoBreak: true, autoRecruit: true, sound: false },
+      /* V1.4：破天阁施政策略（宽纵 / 均衡 / 严苛）与自决范围 */
+      policy: {
+        stance: 'balanced',
+        areas: { seat: true, recruit: true, heal: true, prod: true },
+        recruit: { minRoot: 'fan' },
+        laws: { morning: true, curfew: false, bounty: false },
+      },
+      /* 待处理的已读/暂缓状态（事项本身由状态推导，不落冗余副本） */
+      matterState: { snooze: {}, seen: {}, seenDay: 0 },
+      news: [],
       createdAt: Date.now(),
       lastTick: Date.now(),
     };
@@ -144,9 +154,49 @@ export class Game {
   msg(text, type = 'info') {
     this._msgQueue.push({ text, type, day: this.save.day });
     if (this._msgQueue.length > 40) this._msgQueue.shift();
+    /* 持久化一份，供消息中心跨端查看（不弹窗） */
+    this.save.news = this.save.news || [];
+    this.save.news.unshift({ text, type, day: this.save.day });
+    if (this.save.news.length > 80) this.save.news.pop();
     this.hooks.onMsg && this.hooks.onMsg(text, type);
   }
   drainMsgs() { const q = this._msgQueue.slice(); this._msgQueue.length = 0; return q; }
+
+  /* ---------- 施政策略 ---------- */
+  policy() {
+    return this.save.policy || { stance: 'balanced', areas: {}, recruit: {}, laws: {} };
+  }
+  stance() { return this.policy().stance || 'balanced'; }
+  law(k) { const l = this.policy().laws || {}; return !!l[k]; }
+  /* 三档倾向对修炼、产出、突破、忠诚、心魔的乘数/增量 */
+  stanceMul() {
+    return {
+      lenient: { gain: 0.97, prod: 0.94, break_: 0.0, loyalty: 0.02, demon: 0.94, name: '宽纵' },
+      balanced: { gain: 1, prod: 1, break_: 0, loyalty: 0, demon: 1, name: '均衡' },
+      strict: { gain: 1.05, prod: 1.08, break_: 0.01, loyalty: -0.02, demon: 1.08, name: '严苛' },
+    }[this.stance()] || { gain: 1, prod: 1, break_: 0, loyalty: 0, demon: 1, name: '均衡' };
+  }
+  setPolicy(patch) {
+    const p = this.policy();
+    this.save.policy = {
+      stance: patch.stance || p.stance || 'balanced',
+      areas: Object.assign({ seat: true, recruit: true, heal: true, prod: true }, p.areas, patch.areas || {}),
+      recruit: Object.assign({ minRoot: 'fan' }, p.recruit, patch.recruit || {}),
+      laws: Object.assign({ morning: true, curfew: false, bounty: false }, p.laws, patch.laws || {}),
+    };
+    this.save.policy.updatedAt = Date.now();
+    this.hooks.onDirty && this.hooks.onDirty();
+    return this.save.policy;
+  }
+  /* 宗门史留痕：自决与批复都要可追溯到事由、处置与结果 */
+  chronicle(kind, title, label, result, extra) {
+    const s = this.save;
+    s.story = s.story || { done: [], pending: [], log: [] };
+    s.story.log.unshift(Object.assign({
+      kind, title, label, result, day: s.day, by: kind === 'auto' ? '破天阁' : '祖师',
+    }, extra || {}));
+    if (s.story.log.length > 240) s.story.log.length = 240;
+  }
 
   /* ---------- 资源与通用数值 ---------- */
   addRes(delta) {
@@ -197,7 +247,9 @@ export class Game {
     const techMul = t ? t.cult : 0.85;
     const dq = clamp(1 - d.demon / 220, 0.35, 1);
     const slow = this.save.flags.slowUntil && this.save.day < this.save.flags.slowUntil ? 0.5 : 1;
-    return base * this.rootOf(d).mul * this.physOf(d).mul * techMul * this.envMul() * dq * slow * (0.9 + REALMS[d.realm - 1].i * 0.02);
+    const sm = this.stanceMul();
+    const lawMul = this.law('morning') ? 1.04 : 1;
+    return base * this.rootOf(d).mul * this.physOf(d).mul * techMul * this.envMul() * dq * slow * sm.gain * lawMul * (0.9 + REALMS[d.realm - 1].i * 0.02);
   }
 
   /* ---------- 战力 ---------- */
@@ -254,7 +306,10 @@ export class Game {
       }
       // 心魔
       const phys = this.physOf(d);
-      d.demon = clamp(d.demon + 0.03 * phys.demon * (1 + d.realm * 0.05) * (this.techOf(d)?.calm ? 1 - this.techOf(d).calm : 1), 0, 100);
+      const sm = this.stanceMul();
+      d.demon = clamp(d.demon + 0.03 * phys.demon * sm.demon * (this.law('curfew') ? 0.92 : 1) * (1 + d.realm * 0.05) * (this.techOf(d)?.calm ? 1 - this.techOf(d).calm : 1), 0, 100);
+      // 法度与施政带来的忠诚漂移（每十日结算一次）
+      if (day % 10 === 0 && sm.loyalty) d.loyalty = clamp(d.loyalty + sm.loyalty * 10, 0, 100);
       if (d.demon >= 100 && Math.random() < 0.0005) {
         this.msg(`${d.name} 心魔爆发，修为倒退一境。`, 'bad');
         d.realm = Math.max(1, d.realm - 1);
@@ -304,7 +359,64 @@ export class Game {
       if (s.disciples.length < cap && s.res.liangshi > 120) this.addDisciple('servant');
     }
 
+    /* 破天阁自治：日常与重要事务按施政策略自行处置，结果写入宗门史 */
+    if (day % 15 === 0) this._autoGovern();
+
     /* 榜单同步由外部节流调用 */
+  }
+
+  /* ---------- 破天阁自治 ----------
+   * 判定器输入：事由、候选人、当前策略；输出：处置与消耗。
+   * 全部为确定性挑选（分数排序），同一事务只结算一次。
+   */
+  _autoGovern() {
+    const s = this.save;
+    const p = this.policy();
+    const areas = p.areas || {};
+    const sm = this.stanceMul();
+
+    /* 一、补缺：席位空缺时由阁议推举，严苛档更积极、宽纵档更迟缓 */
+    if (areas.seat !== false && this.modOpen('org') && s.day % 45 === 0) {
+      const vac = [];
+      for (const inst of INSTITUTIONS) {
+        s.posts[inst.key].forEach((id, i) => { if (!id) vac.push({ inst: inst.key, i, seat: inst.seats[i], name: inst.name }); });
+      }
+      if (vac.length) {
+        const v = vac[0];
+        const cands = this.save.disciples.filter((d) => this.eligible(v.inst, d)
+          && !s.posts.dizige.includes(d.id) && !s.posts.hufatang.includes(d.id) && !s.posts.zhanglaohui.includes(d.id));
+        const wantRate = this.stance() === 'strict' ? 0.92 : this.stance() === 'lenient' ? 0.55 : 0.78;
+        if (cands.length && Math.random() < wantRate) {
+          cands.sort((a, b) => this.electScore(b).total - this.electScore(a).total);
+          const d = cands[0];
+          const r = this.assignSeat(v.inst, v.i, d.id);
+          if (r.ok) {
+            this.chronicle('auto', '破天阁·补缺', `${v.name}·${v.seat}`,
+              `依${sm.name}之政，阁议推 ${d.name} 补此席（总评 ${Math.round(this.electScore(d).total)}），未经祖师过目。`);
+          }
+        }
+      }
+    }
+
+    /* 二、招揽：严苛档不自动收人，宽纵档更愿意收 */
+    if (areas.recruit !== false && s.day % 90 === 0 && s.settings.autoRecruit) {
+      const cap = this.cap();
+      const want = this.stance() === 'lenient' ? 6 : this.stance() === 'strict' ? 2 : 4;
+      if (this.servants().length < want && s.res.liangshi > 240 && s.disciples.length < cap) {
+        const d = this.addDisciple('servant');
+        if (d) this.chronicle('auto', '破天阁·招揽', '杂役', `${d.name} 由阁中自行招入，月给口粮，未惊动祖师。`);
+      }
+    }
+
+    /* 三、疗养：伤者复归由阁中排期，不再逐条请裁 */
+    if (areas.heal !== false && s.day % 30 === 0) {
+      const healed = s.disciples.filter((d) => d.state === 'injured' && d.injDays <= 0);
+      for (const d of healed) d.state = 'cultivate';
+      if (healed.length) {
+        this.chronicle('auto', '破天阁·疗养', `${healed.length} 人`,
+          `${healed.map((d) => d.name).join('、')} 伤愈归队，已复入日常课业。`);
+      }
+    }
   }
 
   _checkStage() {
@@ -355,6 +467,9 @@ export class Game {
     const realmSum = this.formal().reduce((a, d) => a + d.realm, 0)
       + this.staff().reduce((a, d) => a + (d.prevStep || 4) * 2, 0);
     const renownRate = Math.min(0.12, this.renown / 40000);
+    /* V1.4：施政策略与法度影响产出（宽纵略低、严苛略高） */
+    const prodMul = this.stanceMul().prod * (this.law('curfew') ? 0.97 : 1) * (this.law('bounty') ? 0.98 : 1);
+    for (const k of Object.keys(gross)) gross[k] *= prodMul;
     const use = {
       lingzhi: gross.lingzhi * 0.8,
       liangshi: Math.max(gross.liangshi * 0.86, s.disciples.length * 0.16),
@@ -478,6 +593,7 @@ export class Game {
     base += (this.save.fac.zangjing || 0) * 0.02;
     base += (d.loyalty - 50) / 1000;
     base -= d.demon / 320;
+    base += this.stanceMul().break_ + (this.law('curfew') ? 0.01 : 0);
     if (this.save.flags.humanFactor) base += 0.02;
     return clamp(base, 0.05, 0.95);
   }
@@ -669,7 +785,7 @@ export class Game {
     const opt = node.options[idx];
     this.save.story.pending = this.save.story.pending.filter((x) => x !== nodeId);
     this.save.story.done.push(nodeId);
-    this.save.story.log.unshift({ id: nodeId, title: node.title, label: opt.label, result: opt.result, day: this.save.day });
+    this.save.story.log.unshift({ id: nodeId, kind: 'story', title: node.title, label: opt.label, result: opt.result, day: this.save.day, by: '祖师' });
     opt.apply(this);
     this._log('story', 'node', { save: this.save.sect.name, node: nodeId, opt: opt.label, day: this.save.day });
     this.msg(`${node.title}：${opt.label}`, 'story');
@@ -681,7 +797,7 @@ export class Game {
     if (!ev) return;
     const opt = ev.options[idx];
     this.applyEffect(opt.effect || {});
-    this.save.story.log.unshift({ id: ev.key, title: ev.name, label: opt.label, result: opt.result, day: this.save.day });
+    this.save.story.log.unshift({ id: ev.key, kind: 'event', title: ev.name, label: opt.label, result: opt.result, day: this.save.day, by: '祖师' });
     this._log('story', 'event', { save: this.save.sect.name, event: ev.key, opt: opt.label, day: this.save.day });
     this.msg(`${ev.name}：${opt.label}`, 'story');
     this.pendingEvent = null;
@@ -917,8 +1033,17 @@ export function migrate(raw) {
   save.settings = save.settings || { autoBreak: true, autoRecruit: true, sound: false };
   save.posts = save.posts || { dizige: [null, null, null], hufatang: [null, null, null], zhanglaohui: [null, null, null] };
   save.story = save.story || { done: [], pending: [], log: [] };
+  if (!Array.isArray(save.story.log)) save.story.log = [];
   save.relations = save.relations || { tianshu: 0, xuanyin: 0, shangmeng: 0 };
   save.layers = save.layers || 1;
+  /* V1.4 增量：旧档不迁移字段，读取时按缺省值补齐 */
+  save.policy = save.policy || {};
+  save.policy.stance = ['lenient', 'balanced', 'strict'].includes(save.policy.stance) ? save.policy.stance : 'balanced';
+  save.policy.areas = Object.assign({ seat: true, recruit: true, heal: true, prod: true }, save.policy.areas || {});
+  save.policy.recruit = Object.assign({ minRoot: 'fan' }, save.policy.recruit || {});
+  save.policy.laws = Object.assign({ morning: true, curfew: false, bounty: false }, save.policy.laws || {});
+  save.matterState = Object.assign({ snooze: {}, seen: {}, seenDay: 0 }, save.matterState || {});
+  save.news = Array.isArray(save.news) ? save.news : [];
   save.v = VERSION;
   return save;
 }

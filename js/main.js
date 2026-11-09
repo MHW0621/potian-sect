@@ -1,7 +1,9 @@
 /* 破天宗 · 启动与编排 */
 import { Game, migrate } from './engine.js';
 import { UI } from './ui.js';
-import { TICK_MS, DAYS_PER_TICK, OFFLINE_CAP_DAYS, RANDOM_EVENTS } from './config.js';
+import { TICK_MS, DAYS_PER_TICK, OFFLINE_CAP_DAYS, RANDOM_EVENTS, FLAGS, resolveFlag } from './config.js';
+import { STORY_BY_ID } from './story.js';
+import { deriveMatters } from './matters.js';
 import * as cloud from './cloud.js';
 import { Admin } from './admin.js';
 
@@ -18,7 +20,32 @@ const state = {
   dirty: false,
   saving: false,
   flags: { announcement: '', modules: {} },
+  grayscale: { sceneHome: true, pendingMode: true },
 };
+
+/* ---------- 灰度开关：后台默认 + 白名单/比例 + 本地覆盖 ---------- */
+const FLAG_OVERRIDE_KEY = 'potian.flags';
+
+export function readFlagOverride() {
+  try { return JSON.parse(localStorage.getItem(FLAG_OVERRIDE_KEY) || '{}') || {}; } catch (e) { return {}; }
+}
+
+function writeFlagOverride(k, v) {
+  const cur = readFlagOverride();
+  if (v === null) delete cur[k]; else cur[k] = !!v;
+  try { localStorage.setItem(FLAG_OVERRIDE_KEY, JSON.stringify(cur)); } catch (e) { /* ignore */ }
+}
+
+function resolveGrayscale() {
+  const acc = cloud.currentAccount() || {};
+  const ov = readFlagOverride();
+  const out = {};
+  for (const k of Object.keys(FLAGS)) {
+    out[k] = resolveFlag(FLAGS[k], acc);
+    if (typeof ov[k] === 'boolean') out[k] = ov[k];
+  }
+  return out;
+}
 
 /* ---------- 视图切换 ---------- */
 function show(id) {
@@ -291,13 +318,20 @@ function startGame(row, revision) {
   save.revision = revision || row.revision || save.revision || 1;
   save.slot = row.slot;
 
+  state.grayscale = resolveGrayscale();
+  const gray = state.grayscale;
+
   const game = new Game(save, {
     modules: state.flags.modules || {},
     onLog: (module, action, detail) => cloud.logEvent(module, action, detail),
     onMsg: (text, type) => UI.pushMsg(text, type),
+    /* V1.4：事件不再驱动弹窗，只更新场景与角标；回滚时按提示模式开关弹窗 */
     onStory: (id) => {
-      if (id === '__event__') { if (UI.panel === 'overview') UI.openEvent(); }
-      else { UI.openStory(id); }
+      if (gray.pendingMode === false) {
+        const node = id === '__event__' ? game.pendingEvent : STORY_BY_ID[id];
+        if (node) setTimeout(() => UI.storyPopup(node, id === '__event__'), 0);
+      }
+      setTimeout(() => UI.syncScene(), 0);
     },
     onDirty: () => { state.dirty = true; },
   });
@@ -322,16 +356,34 @@ function startGame(row, revision) {
     opponents: state.opponents,
     account: cloud.currentAccount(),
     modules: state.flags.modules || {},
+    grayscale: gray,
+    setFlag: (k, v) => {
+      writeFlagOverride(k, v);
+      state.grayscale = resolveGrayscale();
+      UI.flags = state.grayscale;
+      UI.rebuildHome();
+    },
     sessions: () => openSessions(),
     openAdmin: () => {
-      Admin.helpers = { back: () => { show('view-game'); UI.render(); } };
+      Admin.helpers = { back: () => { show('view-game'); UI.enter(); } };
       Admin.open();
     },
     changePass: () => openChangePass(),
+    /* 事项处置：请求编号做幂等，重复点击不会重复结算 */
+    matterAct: (ref, action, note) => {
+      const req = newReqId();
+      cloud.matterAct(save.slot, req, ref, action, note).catch(() => {});
+    },
+    /* 施政策略写入服务端，跨端一致 */
+    syncPolicy: (p) => cloud.policySet(save.slot, p).catch(() => {}),
   };
 
-  UI.mount(game, helpers);
+  state.game = game;
+  state.dirty = false;
+
   show('view-game');
+  UI.mount(game, helpers);
+  UI.enter();
   bindGameChromeOnce();
 
   // 离线结算
@@ -346,6 +398,8 @@ function startGame(row, revision) {
 
   loadFlags();
   refreshRank();
+  /* 首次进入时把施政策略同步到服务端镜像，供多端与接口读取 */
+  cloud.policySet(save.slot, save.policy).catch(() => {});
 }
 
 let loopTick = 0;
@@ -358,7 +412,18 @@ function loop() {
   state.dirty = true;
   loopTick++;
   UI.renderTop();
-  if (loopTick % 4 === 0 && (UI.panel === 'overview' || UI.panel === 'disciples' || UI.panel === 'workshop' || UI.panel === 'world' || UI.panel === 'tasks')) UI.renderPanel();
+  if (loopTick % 4 === 0 && UI.isLive()) UI.renderPanel();
+  /* 场景：状态字段变更后两秒内重绘（弟子位置、建筑光晕随状态走） */
+  if (loopTick % 8 === 0) UI.syncScene();
+  /* 状态变化才让顶栏红点跟上，避免每帧重排 DOM */
+  if (loopTick % 8 === 4) UI.syncBadges(UI._matters || []);
+}
+
+function newReqId() {
+  try {
+    if (window.crypto && crypto.randomUUID) return crypto.randomUUID();
+  } catch (e) { /* ignore */ }
+  return 'req-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
 }
 
 /* ---------- 自动保存 ---------- */
@@ -368,23 +433,36 @@ async function flush(explicit) {
   state.saving = true;
   const rev = g.save.revision;
   try {
-    const r = await cloud.putSave(g.save, rev);
+    const matters = deriveMatters(g).map((m) => ({ ref: m.ref, level: m.level, kind: m.kind, title: m.title, desc: m.desc || '' }));
+    const r = await cloud.putSave(g.save, rev, { matters });
     if (r.ok) {
       g.save.revision = r.revision;
       state.dirty = false;
       if (explicit) toast('已保存到云端');
       cloud.syncRanking(g.save);
     } else if (r.conflict) {
-      toast('数据已在其他设备更新，已为你刷新');
-      await openSlot(g.save.slot);
+      /* 存档冲突属于三类阻断式提示之一 */
+      UI.modal({
+        title: '存档已在别处更新',
+        sub: '同一账号在其他设备上写过这份宗门',
+        body: '<p class="hint">为避免覆盖对方进度，本次改动未写入云端。载入最新版本后继续；若你确信本地更新，可先导出留档再联系管理员。</p>',
+        actions: [
+          { label: '载入最新', cls: 'primary', onClick: async (c) => { c(); await openSlot(g.save.slot); } },
+          { label: '稍后再说', cls: 'ghost', onClick: (c) => c() },
+        ],
+      });
     } else if (r.sealed) {
       toast('存档维护中，本次改动未写入云端');
       state.dirty = false;
     } else if (r.slotLimit) {
       toast(r.msg || '存档槽位不足');
     } else if (r.auth) {
-      toast('登录已失效，请重新入宗');
-      doSignOut();
+      UI.modal({
+        title: '会话已失效',
+        sub: '口令可能已在其他设备修改',
+        body: '<p class="hint">需要重新登录才能继续保存。本次未写入的改动会在登录后由云端版本覆盖。</p>',
+        actions: [{ label: '重新登录', cls: 'primary', onClick: async (c) => { c(); await doSignOut(); } }],
+      });
     } else if (explicit) {
       toast('保存失败：' + (r.msg || '云端拒绝写入'));
     }
@@ -415,14 +493,6 @@ function bindGameChromeOnce() {
     });
   });
 
-  const drawer = document.getElementById('sidenav');
-  const mask = document.getElementById('drawerMask');
-  document.getElementById('btnDrawer').addEventListener('click', () => {
-    drawer.classList.toggle('open');
-    mask.classList.toggle('on');
-  });
-  mask.addEventListener('click', () => UI.closeDrawer ? UI.closeDrawer() : closeDrawer());
-  document.getElementById('btnClearMsg').addEventListener('click', () => { UI.msgs = []; UI.renderMsgs(); });
   document.getElementById('btnRedeem').addEventListener('click', openRedeem);
   document.getElementById('btnBackSlots').addEventListener('click', async () => {
     const g = state.game;
@@ -432,11 +502,6 @@ function bindGameChromeOnce() {
     renderSlots();
     show('view-slots');
   });
-}
-
-function closeDrawer() {
-  document.getElementById('sidenav').classList.remove('open');
-  document.getElementById('drawerMask').classList.remove('on');
 }
 
 /* ---------- 招收 ---------- */
