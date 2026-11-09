@@ -1,0 +1,480 @@
+/* 破天宗 · 启动与编排 */
+import { Game, migrate } from './engine.js';
+import { UI } from './ui.js';
+import { TICK_MS, DAYS_PER_TICK, OFFLINE_CAP_DAYS, RANDOM_EVENTS } from './config.js';
+import * as cloud from './cloud.js';
+import { Admin } from './admin.js';
+
+const DAYS_PER_SEC = DAYS_PER_TICK / (TICK_MS / 1000);
+const AUTOSAVE_MS = 8000;
+const SLOT_LIMIT = 3;
+
+const state = {
+  session: null,
+  rows: [],
+  game: null,
+  saveTimer: 0,
+  ranking: [],
+  opponents: [],
+  dirty: false,
+  saving: false,
+};
+
+/* ---------- 视图切换 ---------- */
+function show(id) {
+  document.querySelectorAll('.view').forEach((v) => v.classList.toggle('is-active', v.id === id));
+  window.scrollTo(0, 0);
+}
+
+/* ---------- 提示 ---------- */
+const toast = (m) => UI.toast(m);
+
+/* ---------- 启动 ---------- */
+async function boot() {
+  bindAuth();
+  bindSlotView();
+  bindGameChrome();
+
+  const acc = await cloud.restore();
+  if (acc) enterSlots(acc);
+  else show('view-auth');
+
+  setInterval(loop, TICK_MS);
+  setInterval(() => { if (state.dirty) autoSave(); }, AUTOSAVE_MS);
+  window.addEventListener('beforeunload', () => { if (state.dirty) { try { flush(false); } catch (e) {} } });
+}
+
+/* ---------- 登录（账号由管理台开立，无自助注册） ---------- */
+function bindAuth() {
+  document.getElementById('authForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const user = (document.getElementById('authUser').value || '').trim().toLowerCase();
+    const pass = document.getElementById('authPass').value || '';
+    if (!user) return setHint('请输入账号', true);
+    if (!pass) return setHint('请输入口令', true);
+    const btn = document.getElementById('btnLogin');
+    btn.disabled = true; btn.textContent = '验证中';
+    const r = await cloud.login(user, pass);
+    btn.disabled = false; btn.textContent = '入 宗';
+    if (!r.ok) return setHint(r.msg, true);
+    document.getElementById('authPass').value = '';
+    setHint('账号由宗门管理方统一开立，此处不开放自助注册。');
+    enterSlots(r.account);
+  });
+
+  document.getElementById('btnSignOut').addEventListener('click', doSignOut);
+}
+
+function setHint(text, bad) {
+  const el = document.getElementById('authHint');
+  el.textContent = text;
+  el.style.color = bad ? 'var(--seal)' : '';
+}
+
+async function doSignOut() {
+  await cloud.logout();
+  state.game = null; state.session = null; state.rows = [];
+  const btn = document.getElementById('btnAdmin');
+  if (btn) btn.classList.add('hide');
+  show('view-auth');
+}
+
+/* ---------- 存档 ---------- */
+function bindSlotView() {
+  document.getElementById('slotGrid').addEventListener('click', (e) => {
+    const b = e.target.closest('[data-slot]');
+    if (!b) return;
+    const slot = Number(b.dataset.slot);
+    const act = b.dataset.do;
+    if (act === 'create') createSlot(slot);
+    else if (act === 'open') openSlot(slot);
+    else if (act === 'del') deleteSlot(slot);
+  });
+}
+
+async function enterSlots(session) {
+  state.session = session;
+  show('view-slots');
+  const who = (session.nick || session.username) + (session.role === 'admin' ? ' · 管理员' : '');
+  document.getElementById('slotsUser').textContent = `${who} · 云端存档`;
+  document.getElementById('slotsHint').textContent = '同一账号在手机、平板与电脑上登录，看到的是同一份宗门。';
+  const ab = document.getElementById('btnAdmin');
+  if (ab) {
+    ab.classList.toggle('hide', session.role !== 'admin');
+    if (!ab._bound) {
+      ab._bound = true;
+      ab.addEventListener('click', () => {
+        Admin.helpers = { back: () => show('view-slots') };
+        Admin.open();
+      });
+    }
+  }
+  await refreshRows();
+  renderSlots();
+}
+
+async function refreshRows() {
+  try {
+    state.rows = await cloud.listSaves();
+  } catch (e) {
+    state.rows = [];
+    document.getElementById('slotsHint').textContent = '存档读取失败：' + e.message;
+  }
+}
+
+function renderSlots() {
+  const grid = document.getElementById('slotGrid');
+  const cards = [];
+  for (let i = 0; i < SLOT_LIMIT; i++) {
+    const row = state.rows.find((r) => r.slot === i);
+    if (row) {
+      const d = row.data || {};
+      const day = d.day || 0;
+      cards.push(`<div class="card slot-card">
+        <div class="no">存档 ${i + 1}</div>
+        <div class="name">${esc(row.sect_name || '未名宗')}</div>
+        <div class="meta"><span>祖师 ${esc(row.founder_name || '—')}</span><span>第 ${row.stage || 1} 幕</span></div>
+        <div class="meta"><span>开宗 ${Math.floor(day / 360) + 1} 年</span><span>弟子 ${row.disciple_count || 0}</span><span>最高 ${row.max_step || 1} 步</span></div>
+        <div class="meta"><span>修订号 ${row.revision}</span></div>
+        <div class="row" style="margin-top:auto">
+          <button class="btn primary sm" data-slot="${i}" data-do="open">入宗</button>
+          <button class="btn ghost sm danger" data-slot="${i}" data-do="del">删除</button>
+        </div>
+      </div>`);
+    } else {
+      cards.push(`<div class="card slot-card is-empty">
+        <div class="no">存档 ${i + 1}</div>
+        <p class="sub">空置 · 尚未开宗</p>
+        <button class="btn sm" data-slot="${i}" data-do="create">在此开宗</button>
+      </div>`);
+    }
+  }
+  grid.innerHTML = cards.join('');
+}
+
+function esc(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+function createSlot(slot) {
+  UI.modal({
+    title: '开宗立派',
+    sub: '落雁原 · 不祥之地 · 断脉之上',
+    body: `<label class="field"><span>宗门之名</span><input id="inSect" maxlength="8" placeholder="破天宗" value="破天宗"></label>
+      <label class="field"><span>祖师之名</span><input id="inFounder" maxlength="8" placeholder="请输入道号"></label>
+      <p class="hint">宗门名将派生三处称谓：最高机构、外部城池、内部小世界。</p>`,
+    actions: [
+      { label: '开宗', cls: 'primary', onClick: (close) => doCreate(slot, close) },
+      { label: '取消', cls: 'ghost', onClick: (c) => c() },
+    ],
+  });
+}
+
+async function doCreate(slot, close) {
+  const sectName = (document.getElementById('inSect').value || '破天宗').trim().slice(0, 8);
+  const founder = (document.getElementById('inFounder').value || '').trim().slice(0, 8);
+  if (!founder) return toast('请填写祖师道号');
+  const save = Game.create({ sectName, founderName: founder, slot }).save;
+  try {
+    const r = await cloud.putSave(save, null);
+    if (!r.ok) throw new Error(r.msg || '开宗失败');
+    save.revision = r.revision;
+    close();
+    await refreshRows();
+    renderSlots();
+    startGame({ slot, data: save, revision: r.revision }, r.revision);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function deleteSlot(slot) {
+  const row = state.rows.find((r) => r.slot === slot);
+  if (!row) return;
+  UI.modal({
+    title: '删除存档',
+    sub: '宗门、弟子、资源与剧情进度将一并清除',
+    body: `<p class="hint">此操作不可撤销。若只是想换个方式查看，请先导出或截图留存。</p>`,
+    actions: [
+      { label: '确认删除', cls: 'danger', onClick: async (c) => { await cloud.deleteSave(slot); c(); await refreshRows(); renderSlots(); } },
+      { label: '取消', cls: 'ghost', onClick: (c) => c() },
+    ],
+  });
+}
+
+function ownerName() {
+  return cloud.displayName();
+}
+
+async function openSlot(slot) {
+  try {
+    const row = await cloud.loadSave(slot);
+    if (!row) return toast('存档不存在');
+    startGame(row, row.revision);
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+/* ---------- 游戏启动 ---------- */
+function startGame(row, revision) {
+  const save = migrate(row.data);
+  save.revision = revision || row.revision || save.revision || 1;
+  save.slot = row.slot;
+
+  const game = new Game(save, {
+    onMsg: (text, type) => UI.pushMsg(text, type),
+    onStory: (id) => {
+      if (id === '__event__') { if (UI.panel === 'overview') UI.openEvent(); }
+      else { UI.openStory(id); }
+    },
+    onDirty: () => { state.dirty = true; },
+  });
+
+  // 恢复离线期间的随机事件
+  if (save.story && save.story.pendingEvt) {
+    const def = RANDOM_EVENTS.find((e) => e.key === save.story.pendingEvt.key);
+    if (def) game.pendingEvent = def;
+  }
+
+  state.game = game;
+  state.dirty = false;
+
+  const helpers = {
+    autoSave: () => { state.dirty = true; },
+    forceSave: () => flush(true),
+    signOut: doSignOut,
+    recruit: (kind) => recruit(kind),
+    battle: (oppName) => doBattle(oppName),
+    refreshRank: () => refreshRank(),
+    ranking: state.ranking,
+    opponents: state.opponents,
+    account: cloud.currentAccount(),
+    openAdmin: () => {
+      Admin.helpers = { back: () => { show('view-game'); UI.render(); } };
+      Admin.open();
+    },
+    changePass: () => openChangePass(),
+  };
+
+  UI.mount(game, helpers);
+  show('view-game');
+  bindGameChromeOnce();
+
+  // 离线结算
+  const elapsedSec = Math.max(0, (Date.now() - (save.lastTick || Date.now())) / 1000);
+  const offDays = Math.min(OFFLINE_CAP_DAYS, Math.floor(elapsedSec * DAYS_PER_SEC));
+  if (offDays > 30) {
+    game.advance(offDays, { silent: true });
+    save.lastTick = Date.now();
+    UI.pushMsg(`离开期间宗门照常运转，共推进 ${offDays} 日（离线收益已按上限结算）。`, 'story');
+    UI.render();
+  }
+
+  refreshRank();
+}
+
+let loopTick = 0;
+function loop() {
+  const g = state.game;
+  if (!g || g.save.ended) return;
+  const speed = g.save.sect.speed || 0;
+  if (speed === 0) return;
+  g.advance(DAYS_PER_TICK * speed);
+  state.dirty = true;
+  loopTick++;
+  UI.renderTop();
+  if (loopTick % 4 === 0 && (UI.panel === 'overview' || UI.panel === 'disciples' || UI.panel === 'workshop' || UI.panel === 'world' || UI.panel === 'tasks')) UI.renderPanel();
+}
+
+/* ---------- 自动保存 ---------- */
+async function flush(explicit) {
+  const g = state.game;
+  if (!g || state.saving) return;
+  state.saving = true;
+  const rev = g.save.revision;
+  try {
+    const r = await cloud.putSave(g.save, rev);
+    if (r.ok) {
+      g.save.revision = r.revision;
+      state.dirty = false;
+      if (explicit) toast('已保存到云端');
+      cloud.syncRanking(g.save);
+    } else if (r.conflict) {
+      toast('数据已在其他设备更新，已为你刷新');
+      await openSlot(g.save.slot);
+    } else if (r.auth) {
+      toast('登录已失效，请重新入宗');
+      doSignOut();
+    } else if (explicit) {
+      toast('保存失败：' + (r.msg || '云端拒绝写入'));
+    }
+  } catch (e) {
+    if (explicit) toast('保存失败：' + e.message);
+  } finally {
+    state.saving = false;
+  }
+}
+
+function autoSave() { flush(false); }
+
+/* ---------- 顶栏/抽屉/兑换 ---------- */
+let chromeBound = false;
+function bindGameChrome() { /* 占位，实际绑定在 first mount 后 */ }
+
+function bindGameChromeOnce() {
+  if (chromeBound) return;
+  chromeBound = true;
+
+  document.querySelectorAll('#speedBox button').forEach((b) => {
+    b.addEventListener('click', () => {
+      if (!state.game) return;
+      state.game.save.sect.speed = Number(b.dataset.speed);
+      state.dirty = true;
+      UI.renderTop();
+      toast(Number(b.dataset.speed) === 0 ? '时间已暂停' : `时间流速 ${b.dataset.speed} 倍`);
+    });
+  });
+
+  const drawer = document.getElementById('sidenav');
+  const mask = document.getElementById('drawerMask');
+  document.getElementById('btnDrawer').addEventListener('click', () => {
+    drawer.classList.toggle('open');
+    mask.classList.toggle('on');
+  });
+  mask.addEventListener('click', () => UI.closeDrawer ? UI.closeDrawer() : closeDrawer());
+  document.getElementById('btnClearMsg').addEventListener('click', () => { UI.msgs = []; UI.renderMsgs(); });
+  document.getElementById('btnRedeem').addEventListener('click', openRedeem);
+  document.getElementById('btnBackSlots').addEventListener('click', async () => {
+    const g = state.game;
+    if (g && state.dirty) await flush(false);
+    state.game = null;
+    await refreshRows();
+    renderSlots();
+    show('view-slots');
+  });
+}
+
+function closeDrawer() {
+  document.getElementById('sidenav').classList.remove('open');
+  document.getElementById('drawerMask').classList.remove('on');
+}
+
+/* ---------- 招收 ---------- */
+function recruit(kind) {
+  const g = state.game;
+  if (!g) return;
+  const cap = 6 + g.save.layers * 4;
+  if (g.save.disciples.length >= cap) return toast(`小世界仅能容纳 ${cap} 人，先开辟更高层`);
+  if (kind === 'servant') {
+    if (g.save.res.liangshi < 60) return toast('粮食不足');
+    g.addRes({ liangshi: -60 });
+    const d = g.addDisciple('servant');
+    UI.pushMsg(`${d.name} 入宗为杂役。`, 'info');
+  } else {
+    if (g.save.res.lingshi < 260) return toast('灵石不足');
+    if (g.save.res.liangshi < 80) return toast('粮食不足');
+    g.addRes({ lingshi: -260, liangshi: -80 });
+    const d = g.addDisciple(Math.random() < 0.12 ? 'genius' : 'formal');
+    UI.pushMsg(`${d.name} 通过查验，入宗为正式弟子。`, 'good');
+  }
+  UI.render();
+  state.dirty = true;
+  autoSave();
+}
+
+/* ---------- 榜单与对战 ---------- */
+async function refreshRank() {
+  const list = await cloud.fetchRanking(50);
+  state.ranking = list;
+  const me = state.game ? state.game.save.sect.name : '';
+  state.opponents = list.filter((r) => r.sect_name !== me);
+  if (UI.helpers) { UI.helpers.ranking = state.ranking; UI.helpers.opponents = state.opponents; }
+  if (state.game && state.game.save.sect.renown > 0) cloud.syncRanking(state.game.save);
+  if (UI.panel === 'rank' || UI.panel === 'battle') UI.renderPanel();
+}
+
+async function doBattle(oppName) {
+  const g = state.game;
+  if (!g) return;
+  if (!g.canChallenge()) return toast('邀约冷却中（每三 game 日一次）');
+  if (!g.save.battle.atk.length) return toast('请先设置进攻编队');
+  const opp = state.opponents.find((o) => o.sect_name === oppName);
+  if (!opp) return toast('对手已不在榜单');
+  UI.modal({
+    title: '发出对战邀约',
+    sub: `对象：${opp.sect_name}`,
+    body: `<p class="hint">对方同意后才会开战。战败方按动态比例损失资源：双方实力接近时掠夺比例较高，差距悬殊时被压低。</p>
+      <div class="kv" style="margin-top:10px"><span>我方战力 <b>${Math.round(g.teamPower(g.save.battle.atk))}</b></span><span>对方约 <b>${opp.renown * 1.6 + opp.max_step * 60 | 0}</b></span></div>`,
+    actions: [
+      { label: '发出邀约', cls: 'primary', onClick: (c) => { c(); const r = g.challenge(opp); UI.render(); state.dirty = true; autoSave(); refreshRank(); if (r.win) toast('对方应战，我方获胜'); else toast('对方应战，我方失利'); } },
+      { label: '取消', cls: 'ghost', onClick: (c) => c() },
+    ],
+  });
+}
+
+/* ---------- 兑换码 ---------- */
+function openRedeem() {
+  const g = state.game;
+  if (!g) return;
+  UI.modal({
+    title: '兑换',
+    sub: '输入不区分大小写，自动去除空格',
+    body: `<label class="field"><span>兑换码</span><input id="inCode" placeholder="例如 POTIAN2026" maxlength="32"></label>
+      <p class="hint">兑换记录会写入云端。单存档对同一码只能使用一次。</p>`,
+    actions: [
+      { label: '兑换', cls: 'primary', onClick: async (c) => {
+        const code = (document.getElementById('inCode').value || '').toUpperCase().replace(/\s/g, '');
+        if (!code) return toast('请输入兑换码');
+        const r = await cloud.redeem(code, g.save.slot);
+        if (!r.ok) {
+          const map = { not_found: '兑换码不存在', expired: '兑换码已过期', not_started: '兑换码尚未生效', used: '该存档已使用过此码', unauthenticated: '登录已失效' };
+          return toast(map[r.reason] || r.msg || '兑换失败');
+        }
+        const rw = r.reward || {};
+        if (rw.res) g.addRes(rw.res);
+        if (rw.renown) g.addRenown(rw.renown);
+        if (rw.fortune) g.addFortune(rw.fortune);
+        c();
+        UI.render();
+        state.dirty = true;
+        autoSave();
+        const items = Object.entries(rw.res || {}).map(([k, v]) => `${resName(k)} ×${v}`).join('、');
+        UI.modal({ title: '兑换成功', body: `<p class="story-text">${items}${rw.renown ? `；声望 +${rw.renown}` : ''}${rw.fortune ? `；气运 +${rw.fortune}` : ''}</p>`, actions: [{ label: '收下', cls: 'primary', onClick: (x) => x() }] });
+      } },
+      { label: '取消', cls: 'ghost', onClick: (c) => c() },
+    ],
+  });
+}
+
+/* ---------- 修改口令 ---------- */
+function openChangePass() {
+  const acc = cloud.currentAccount() || {};
+  UI.modal({
+    title: '修改口令',
+    sub: `账号 ${acc.username || ''}`,
+    body: `<label class="field"><span>原口令</span><input id="op" type="password" maxlength="64" autocomplete="current-password"></label>
+      <label class="field"><span>新口令</span><input id="np2" type="password" maxlength="64" autocomplete="new-password" placeholder="至少 6 位"></label>
+      <p class="hint">修改后，其他设备上的登录会失效。</p>`,
+    actions: [
+      { label: '确认修改', cls: 'primary', onClick: async (c) => {
+          const o = document.getElementById('op').value || '';
+          const n = document.getElementById('np2').value || '';
+          if (n.length < 6) return toast('新口令至少 6 位');
+          const r = await cloud.changePassword(o, n);
+          if (!r.ok) return toast(r.msg);
+          c(); toast('口令已修改');
+        } },
+      { label: '取消', cls: 'ghost', onClick: (c) => c() },
+    ],
+  });
+}
+
+function resName(k) {  const m = { lingshi: '灵石', liangshi: '粮食', lingzhi: '灵植', lingyao: '灵药', danyao: '丹药', qicai: '炼器材料', fulu: '符箓材料', zhenfa: '阵法材料', yaoshou: '妖兽材料', kuangshi: '矿石', qizhen: '奇珍异宝', gongfa: '功法残页' };
+  return m[k] || k;
+}
+
+/* ---------- 事件绑定 ---------- */
+let booted = false;
+function safeBoot() { if (booted) return; booted = true; boot(); }
+if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', safeBoot);
+else safeBoot();
+

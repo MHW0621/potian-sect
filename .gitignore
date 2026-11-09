@@ -1,0 +1,9 @@
+.workbuddy/
+.wbapp_*
+*.genie
+node_modules/
+_sim*.mjs
+_dbg.mjs
+doc_text.txt
+.DS_Store
+Thumbs.db

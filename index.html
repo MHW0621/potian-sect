@@ -1,0 +1,135 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#f4ecdd">
+<title>破天宗 · 修仙模拟</title>
+<link rel="stylesheet" href="css/style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='4' fill='%239d2b22'/%3E%3Ctext x='16' y='23' font-size='18' text-anchor='middle' fill='%23f4ecdd' font-family='serif'%3E破%3C/text%3E%3C/svg%3E">
+</head>
+<body>
+<div class="wash" aria-hidden="true"></div>
+
+<!-- ============ 登录 ============ -->
+<section id="view-auth" class="view is-active">
+  <div class="auth-wrap">
+    <div class="brand">
+      <div class="seal">破</div>
+      <h1>破天宗</h1>
+      <p class="sub">断层之劫后一千二百年 · 云荒东南 · 落雁原</p>
+    </div>
+
+    <div class="card auth-card">
+      <form id="authForm" autocomplete="on">
+        <label class="field">
+          <span>宗门账号</span>
+          <input id="authUser" autocomplete="username" autocapitalize="off" spellcheck="false"
+                 placeholder="由宗门管理方发放" maxlength="20" required>
+        </label>
+        <label class="field">
+          <span>口令</span>
+          <input id="authPass" type="password" autocomplete="current-password" placeholder="至少 6 位" maxlength="64" required>
+        </label>
+        <p class="hint" id="authHint">账号由宗门管理方统一开立，此处不开放自助注册。</p>
+        <button type="submit" class="btn primary block" id="btnLogin">入 宗</button>
+      </form>
+      <p class="hint tiny">尚未持账号者，请向宗门管理方申领。同一账号在手机、平板与电脑上通用，宗门数据存于云端。</p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 存档选择 ============ -->
+<section id="view-slots" class="view">
+  <div class="slots-wrap">
+    <header class="slots-head">
+      <div>
+        <h2>择一宗门</h2>
+        <p class="sub" id="slotsUser">—</p>
+      </div>
+      <div class="row">
+        <button class="btn ghost hide" id="btnAdmin">管理台</button>
+        <button class="btn ghost" id="btnSignOut">退出</button>
+      </div>
+    </header>
+    <div class="slot-grid" id="slotGrid"></div>
+    <p class="hint center" id="slotsHint"></p>
+  </div>
+</section>
+
+<!-- ============ 管理台（仅管理员） ============ -->
+<section id="view-admin" class="view">
+  <div class="admin-wrap">
+    <header class="slots-head">
+      <div>
+        <h2>宗门管理台</h2>
+        <p class="sub" id="adminWho">—</p>
+      </div>
+      <button class="btn ghost" id="btnAdminBack">返回</button>
+    </header>
+    <div class="tabs" id="adminTabs" role="tablist">
+      <button class="tab is-on" data-atab="accounts">账号</button>
+      <button class="tab" data-atab="codes">兑换码</button>
+      <button class="tab" data-atab="notice">须知</button>
+    </div>
+    <div id="adminStage"></div>
+  </div>
+</section>
+
+<!-- ============ 游戏主界面 ============ -->
+<section id="view-game" class="view">
+  <header class="topbar">
+    <button class="icon-btn only-mobile" id="btnDrawer" aria-label="导航">☰</button>
+    <div class="sect-id">
+      <strong id="hSect">破天宗</strong>
+      <span id="hFounder">祖师</span>
+    </div>
+    <div class="hstats">
+      <span class="pill" id="hStage">第一幕</span>
+      <span class="st">声望 <b id="hRenown">0</b></span>
+      <span class="st">气运 <b id="hFortune">0</b></span>
+      <span class="st hide-sm" id="hDisc">弟子 0</span>
+      <span class="st hide-sm" id="hDate">开宗 1 年</span>
+    </div>
+    <div class="speed" id="speedBox" role="group" aria-label="时间流速">
+      <button data-speed="0" title="暂停">止</button>
+      <button data-speed="1" class="on" title="一倍速">一</button>
+      <button data-speed="2" title="二倍速">二</button>
+      <button data-speed="5" title="五倍速">五</button>
+    </div>
+  </header>
+
+  <nav class="sidenav" id="sidenav">
+    <button class="nav-item is-on" data-panel="overview"><i>总</i><span>宗门总览</span></button>
+    <button class="nav-item" data-panel="disciples"><i>徒</i><span>弟子名录</span></button>
+    <button class="nav-item" data-panel="org"><i>阁</i><span>机构席位</span></button>
+    <button class="nav-item" data-panel="workshop"><i>坊</i><span>资源工坊</span></button>
+    <button class="nav-item" data-panel="tasks"><i>务</i><span>任务派遣</span></button>
+    <button class="nav-item" data-panel="world"><i>界</i><span>大世界</span></button>
+    <button class="nav-item" data-panel="battle"><i>战</i><span>宗门对战</span></button>
+    <button class="nav-item" data-panel="rank"><i>榜</i><span>赛季榜单</span></button>
+    <button class="nav-item" data-panel="chronicle"><i>史</i><span>宗门史</span></button>
+    <button class="nav-item" data-panel="settings"><i>设</i><span>设置</span></button>
+    <div class="nav-foot">
+      <button class="nav-item mini" id="btnRedeem"><i>兑</i><span>兑换</span></button>
+      <button class="nav-item mini" id="btnBackSlots"><i>返</i><span>切换存档</span></button>
+    </div>
+  </nav>
+
+  <main class="stage" id="stage"></main>
+
+  <aside class="msgbox">
+    <div class="msg-head"><span>宗门消息</span><button class="icon-btn" id="btnClearMsg" title="清空">×</button></div>
+    <ul id="msgList"></ul>
+  </aside>
+
+  <div class="drawer-mask" id="drawerMask"></div>
+</section>
+
+<div id="modalRoot"></div>
+<div id="toast" role="status"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tencent-ai/workbuddy-cloud-sdk@dev/lib/index.global.js"></script>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
