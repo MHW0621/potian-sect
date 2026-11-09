@@ -45,8 +45,16 @@ function showView(id) {
   window.scrollTo(0, 0);
 }
 
+/* 十个页面收成六个入口：低频页收进二级切换，一级只留"进来就知道要干什么"的那几件 */
+const GROUPS = {
+  people: { key: 'sub', pages: [['accounts', '账号'], ['players', '玩家数据']], def: 'accounts' },
+  system: { key: 'subSys', pages: [['switches', '模块开关'], ['logs', '操作日志'], ['settings', '公告与安全'], ['notice', '后台须知']], def: 'switches' },
+};
+
 export const Admin = {
   tab: 'overview',
+  sub: 'accounts',
+  subSys: 'switches',
   busy: false,
   d: { overview: null, accounts: [], saves: [], codes: [], logs: [], seasons: [], settings: {}, player: null, redeemLogs: [], logModule: '' },
 
@@ -75,7 +83,32 @@ export const Admin = {
       this.markTab();
       this.refresh();
     });
-    document.getElementById('adminStage').addEventListener('click', (e) => this.onClick(e));
+    document.getElementById('adminStage').addEventListener('click', (e) => {
+      const sub = e.target.closest('[data-asub]');
+      if (sub) {
+        const g = GROUPS[this.tab];
+        if (g) this[g.key] = sub.dataset.asub;
+        this.refresh();
+        return;
+      }
+      this.onClick(e);
+    });
+    /* 全局搜索：一个框，落到能查到东西的那一页去 */
+    const box = document.getElementById('admSearch');
+    if (box) {
+      const go = () => {
+        const q = box.value.trim();
+        if (!q) return;
+        this.d.q = q;
+        this.d.pu = q;
+        /* 像账号名的（无空格、字母数字下划线）先去账号页，否则直接翻存档 */
+        if (/^[A-Za-z0-9_.-]{2,20}$/.test(q)) { this.tab = 'people'; this.sub = 'players'; }
+        else { this.tab = 'saves'; }
+        this.markTab();
+        this.refresh();
+      };
+      box.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); go(); } });
+    }
     // 弹窗内的按钮（留存快照、回滚、移出白名单）同样走同一套分发
     const root = document.getElementById('modalRoot');
     if (root && !root._adminBound) {
@@ -91,7 +124,7 @@ export const Admin = {
   },
 
   async refresh() {
-    const t = this.tab;
+    const t = this.page();
     try {
       if (t === 'overview') this.d.overview = await api.overview();
       else if (t === 'accounts') this.d.accounts = await api.list();
@@ -106,6 +139,20 @@ export const Admin = {
       UI.toast(err.message || '读取失败');
     }
     this.render();
+  },
+
+  /* 当前真正要渲染的那一页（一级页签或组内子页） */
+  page() {
+    const g = GROUPS[this.tab];
+    return g ? (this[g.key] || g.def) : this.tab;
+  },
+
+  subBar() {
+    const g = GROUPS[this.tab];
+    if (!g) return '';
+    const cur = this[g.key] || g.def;
+    return `<div class="adm-sub">${g.pages.map(([k, n]) =>
+      `<button class="adm-chip ${k === cur ? 'is-on' : ''}" data-asub="${k}">${n}</button>`).join('')}</div>`;
   },
 
   render() {
@@ -123,7 +170,17 @@ export const Admin = {
       settings: () => this.settingsHtml(),
       notice: () => this.noticeHtml(),
     };
-    box.innerHTML = (map[this.tab] || map.overview)();
+    const page = this.page();
+    box.innerHTML = this.subBar() + (map[page] || map.overview)();
+  },
+
+  /* 每页统一页头：一页只说一件事，主操作固定在右上角。
+     以前各页一进来就是一堆卡，看不到"这页是干什么的"。 */
+  head(title, desc, acts) {
+    return `<div class="adm-head">
+      <div class="ah-t"><h3>${esc(title)}</h3><p>${esc(desc)}</p></div>
+      ${acts ? `<div class="ah-act">${acts}</div>` : ''}
+    </div>`;
   },
 
   /* ================= 总览 ================= */
@@ -134,9 +191,10 @@ export const Admin = {
     const stageMix = o.stage_mix || {};
     const stageTxt = Object.keys(stageMix).sort().map((k) => `第${k}幕 ${stageMix[k]}`).join(' · ') || '—';
     return `<div class="stack">
+      ${this.head('总览', '一屏看清宗门现在的样子：谁在线、多少存档、赛季走到哪一步。',
+    '<button class="btn sm ghost" data-a="ov:refresh">刷新</button>')}
       <div class="card">
-        <div class="card-head"><div class="t"><h3>日常巡检</h3><small>六项常看指标</small></div>
-          <button class="btn sm ghost" data-a="ov:refresh">刷新</button></div>
+        <div class="card-head"><div class="t"><h3>日常巡检</h3><small>六项常看指标</small></div></div>
         <div class="metrics">
           <div class="metric"><div class="k">在线账号</div><div class="v">${num(o.online)}</div></div>
           <div class="metric"><div class="k">账号总数</div><div class="v">${num(o.accounts)}<small>玩家 ${num(o.players)}</small></div></div>
@@ -157,12 +215,17 @@ export const Admin = {
       </div>
 
       <div class="card">
-        <div class="card-head"><div class="t"><h3>最近操作</h3><small>全量日志见「日志中心」</small></div>
-          <button class="btn sm ghost" data-a="ov:purge">清理到期存档</button></div>
+        <div class="card-head"><div class="t"><h3>最近操作</h3><small>全量日志见「日志中心」</small></div></div>
         <div class="list">${(o.recent_logs || []).length ? o.recent_logs.map((l) => `<div class="item">
           <div class="main"><div class="name">${esc(l.action)} <span class="pill mute">${esc(MOD_NAME[l.module] || l.module)}</span></div>
           <div class="meta"><span>${esc(l.at)}</span><span>对象 ${esc(l.target || '—')}</span></div></div>
         </div>`).join('') : '<div class="item"><div class="main"><div class="name">暂无记录</div></div></div>'}</div>
+      </div>
+
+      <div class="adm-tools">
+        <span class="hint">维护：清掉到期存档可腾出配额，操作会写入日志。</span>
+        <span class="sp"></span>
+        <button class="btn sm ghost" data-a="ov:purge">清理到期存档</button>
       </div>
     </div>`;
   },
@@ -203,8 +266,10 @@ export const Admin = {
     }).join('');
 
     return `<div class="stack">
+      ${this.head('账号', '开立、停用、重置口令、批量导入。玩家账号只能在这里创建，站点不开放自助注册。',
+    '<button class="btn sm ghost" data-a="acc:refresh">刷新名录</button>')}
       <div class="card">
-        <div class="card-head"><div class="t"><h3>开立新账号</h3><small>玩家账号只能在此创建，站点不提供自助注册</small></div></div>
+        <div class="card-head"><div class="t"><h3>开立新账号</h3><small>一次一人，可批量请用下方导入</small></div></div>
         <div class="form-grid">
           <label class="field"><span>账号</span><input id="nu" maxlength="20" autocapitalize="off" spellcheck="false" placeholder="3-20 位小写字母/数字/下划线"></label>
           <label class="field"><span>称呼</span><input id="nn" maxlength="12" placeholder="显示名，可留空"></label>
@@ -217,22 +282,23 @@ export const Admin = {
           </label>
           <label class="field"><span>备注</span><input id="nnt" maxlength="64" placeholder="线下核对用，可留空"></label>
         </div>
-        <div class="row" style="margin-top:12px">
+        <div class="adm-acts">
           <button class="btn primary" data-a="acc:create">开立账号</button>
-          <button class="btn ghost" data-a="acc:refresh">刷新名录</button>
+          <p class="hint">口令经服务端加盐散列存储，管理台不可见；忘记时只能重置。新账号首次登录须改密后才能进入游戏。</p>
         </div>
-        <p class="hint">口令经服务端加盐散列存储，管理台不可见；忘记时只能重置。新账号首次登录须改密后才能进入游戏。</p>
       </div>
 
       <div class="card">
         <div class="card-head"><div class="t"><h3>批量导入</h3><small>每行一条：账号,初始口令,备注</small></div></div>
-        <label class="field"><span>粘贴表格内容</span>
-          <textarea id="bulk" rows="4" placeholder="lin01,lin2026,小林&#10;lin02,lin2026,&#10;lin03,lin2026,旧部"></textarea>
-        </label>
-        <div class="row" style="margin-top:10px">
-          <button class="btn primary" data-a="acc:bulk">逐行校验并导入</button>
+        <div class="form-grid">
+          <label class="fg-full"><span>粘贴表格内容</span>
+            <textarea id="bulk" rows="4" placeholder="lin01,lin2026,小林&#10;lin02,lin2026,&#10;lin03,lin2026,旧部"></textarea>
+          </label>
         </div>
-        <p class="hint">账号名重复、格式不合规、口令不足 6 位的行会被跳过，只写入合法行，结束后回显成功与失败明细。</p>
+        <div class="adm-acts">
+          <button class="btn primary" data-a="acc:bulk">逐行校验并导入</button>
+          <p class="hint">账号名重复、格式不合规、口令不足 6 位的行会被跳过，只写入合法行，结束后回显成功与失败明细。</p>
+        </div>
       </div>
 
       <div class="card">
@@ -267,14 +333,19 @@ export const Admin = {
     </div>`).join('');
 
     return `<div class="stack">
+      ${this.head('存档', '按宗门名或账号检索，封存、导出、删除。删除先封存七日，期间可撤销。')}
       <div class="card">
         <div class="card-head"><div class="t"><h3>存档检索</h3><small>按宗门名或账号筛选</small></div></div>
-        <div class="row">
-          <input id="sq" class="grow" maxlength="24" placeholder="宗门名 / 账号" value="${esc(this.d.q || '')}">
+        <div class="form-grid">
+          <label class="fg-full"><span>关键词</span>
+            <input id="sq" maxlength="24" placeholder="宗门名 / 账号" value="${esc(this.d.q || '')}">
+          </label>
+        </div>
+        <div class="adm-acts">
           <button class="btn primary" data-a="sav:search">检索</button>
           <button class="btn ghost" data-a="sav:purge">清理到期</button>
+          <p class="hint">「清理到期」会真正删除已过保留期的存档，写入日志；仅标记未到期的不会被动。</p>
         </div>
-        <p class="hint">删除采用「先封存、后标记」：提交后进入封存并保留七日，七日届满才真正清理；期间可撤销。</p>
       </div>
       <div class="card">
         <div class="card-head"><div class="t"><h3>存档列表</h3><small>共 ${this.d.saves.length} 份</small></div></div>
@@ -286,19 +357,22 @@ export const Admin = {
   /* ================= 玩家数据 ================= */
   playersHtml() {
     const p = this.d.player;
-    const head = `<div class="card">
+    const searchCard = `<div class="card">
       <div class="card-head"><div class="t"><h3>按账号查看</h3><small>全部只读</small></div></div>
-      <div class="row">
-        <input id="pu" class="grow" maxlength="20" placeholder="账号名，如 lin01" value="${esc(this.d.pu || '')}">
-        <input id="ps" type="number" min="1" max="10" style="width:90px" placeholder="槽位" value="${esc(this.d.ps || 1)}">
-        <button class="btn primary" data-a="ply:load">查看</button>
+      <div class="form-grid">
+        <label><span>账号名</span><input id="pu" maxlength="20" placeholder="如 lin01" value="${esc(this.d.pu || '')}"></label>
+        <label><span>槽位</span><input id="ps" type="number" min="1" max="10" placeholder="1" value="${esc(this.d.ps || 1)}"></label>
       </div>
-      <p class="hint">查看动作会写入日志。此页不提供任何修改入口。</p>
+      <div class="adm-acts">
+        <button class="btn primary" data-a="ply:load">查看</button>
+        <p class="hint">查看动作会写入日志。此页不提供任何修改入口。</p>
+      </div>
     </div>`;
-    if (!p) return `<div class="stack">${head}</div>`;
+    const pageHead = this.head('玩家数据', '按账号与槽位查一份存档的全部只读视图，用于排查问题。');
+    if (!p) return `<div class="stack">${pageHead}${searchCard}</div>`;
 
     if (!p.save) {
-      return `<div class="stack">${head}
+      return `<div class="stack">${pageHead}${searchCard}
         <div class="card"><div class="card-head"><div class="t"><h3>${esc(p.account.username)}</h3><small>该槽位尚无存档</small></div></div>
         <p class="hint">账号状态 ${esc(p.account.status)} · 槽位 ${p.account.slot_limit} · 在线 ${p.account.online}</p></div></div>`;
     }
@@ -315,7 +389,7 @@ export const Admin = {
     const postsTxt = Object.keys(posts).map((k) => `${instName[k] || k}：${(posts[k] || []).join('、')}`).join('<br>');
     const flow = p.flow || {};
 
-    return `<div class="stack">${head}
+    return `<div class="stack">${pageHead}${searchCard}
       <div class="card">
         <div class="card-head"><div class="t"><h3>${esc(s.sect)}</h3><small>${esc(p.account.username)} · 槽位 ${s.slot + 1}${s.sealed ? ' · 封存中' : ''}</small></div></div>
         <div class="metrics">
@@ -380,6 +454,8 @@ export const Admin = {
     </div>`).join('');
 
     return `<div class="stack">
+      ${this.head('兑换码', '后台只发码、不改数值。同账号同码只兑一次，由服务端核销并留痕。',
+    '<button class="btn sm ghost" data-a="code:refresh">刷新</button>')}
       <div class="card">
         <div class="card-head"><div class="t"><h3>发一枚兑换码</h3><small>同码重发会覆盖奖励内容</small></div></div>
         <div class="form-grid">
@@ -392,12 +468,10 @@ export const Admin = {
           <label class="field"><span>有效天数</span><input id="c_days" type="number" min="1" max="3650" value="365"></label>
           <label class="field"><span>备注</span><input id="c_note" maxlength="40" placeholder="发放缘由"></label>
         </div>
-        <div class="row" style="margin-top:12px">
+        <div class="adm-acts">
           <button class="btn primary" data-a="code:add">发放</button>
-          <button class="btn ghost" data-a="code:refresh">刷新</button>
-          <button class="btn ghost" data-a="code:export">导出码表</button>
+          <p class="hint">同账号同码只能兑一次，由服务端核销并留痕；码存在与否不影响已发放的到账记录。</p>
         </div>
-        <p class="hint">后台只发码，不改数值。同账号同码只能兑一次，由服务端核销并留痕。</p>
       </div>
 
       <div class="card">
@@ -410,14 +484,15 @@ export const Admin = {
           <label class="field"><span>有效天数</span><input id="b_days" type="number" min="1" max="3650" value="30"></label>
           <label class="field"><span>备注</span><input id="b_note" maxlength="40" placeholder="本批用途"></label>
         </div>
-        <div class="row" style="margin-top:12px">
+        <div class="adm-acts">
           <button class="btn primary" data-a="code:batch">生成</button>
+          <p class="hint">单次最多 50 枚，生成后自动写入日志，可在下方码表导出。</p>
         </div>
-        <p class="hint">单次最多 50 枚，生成后自动写入日志并可直接导出。</p>
       </div>
 
       <div class="card">
-        <div class="card-head"><div class="t"><h3>已发兑换码</h3><small>共 ${this.d.codes.length} 枚</small></div></div>
+        <div class="card-head"><div class="t"><h3>已发兑换码</h3><small>共 ${this.d.codes.length} 枚</small></div>
+          <button class="btn sm ghost" data-a="code:export">导出码表</button></div>
         <div class="list">${rows || '<div class="item"><div class="main"><div class="name">尚无兑换码</div></div></div>'}</div>
       </div>
 
@@ -447,9 +522,10 @@ export const Admin = {
     </div>`).join('');
 
     return `<div class="stack">
+      ${this.head('赛季', '开启、运行、锁定快照、发奖。重置只清榜单分数，不动玩家存档。',
+    '<button class="btn sm primary" data-a="ss:open">开启新赛季</button>')}
       <div class="card">
-        <div class="card-head"><div class="t"><h3>赛季五步</h3><small>每一步都由管理员手动触发</small></div>
-          <button class="btn sm primary" data-a="ss:open">开启新赛季</button></div>
+        <div class="card-head"><div class="t"><h3>赛季五步</h3><small>每一步都由管理员手动触发</small></div></div>
         <p class="hint">开启新赛季 → 日常运行（榜单随存档同步刷新）→ 结束并锁定快照 → 导出榜单 → 按名次批量生成专属码。<br>
         重置只清空榜单分数与赛季统计，玩家的弟子、资源、建筑与剧情进度一律保留。</p>
       </div>
@@ -483,9 +559,10 @@ export const Admin = {
     }).join('');
 
     return `<div class="stack">
+      ${this.head('开关', '全服级模块开关。关闭只挡入口与结算，不动任何已有数据。',
+    '<button class="btn sm ghost" data-a="sw:refresh">刷新</button>')}
       <div class="card">
-        <div class="card-head"><div class="t"><h3>子系统开关</h3><small>全服级，按模块粒度</small></div>
-          <button class="btn sm ghost" data-a="sw:refresh">刷新</button></div>
+        <div class="card-head"><div class="t"><h3>子系统开关</h3><small>全服级，按模块粒度</small></div></div>
         <p class="hint">关闭后入口隐藏、接口拒绝、定时结算暂停，已有数据原样保留；重新开启即恢复。关闭不触发任何数据清理。</p>
         <div class="list" style="margin-top:10px">${rows}</div>
       </div>
@@ -508,15 +585,20 @@ export const Admin = {
       </div>
     </div>`).join('');
     return `<div class="stack">
+      ${this.head('日志', '只追加，不可删除。按模块与关键词定位一次具体操作。',
+    '<button class="btn sm ghost" data-a="log:export">导出</button>')}
       <div class="card">
-        <div class="card-head"><div class="t"><h3>日志检索</h3><small>只追加，不可删除</small></div>
-          <button class="btn sm ghost" data-a="log:export">导出</button></div>
-        <div class="row">
-          <select id="lm" style="max-width:160px">${opts}</select>
-          <input id="lq" class="grow" maxlength="30" placeholder="账号 / 对象 / 动作" value="${esc(this.d.logQ || '')}">
-          <button class="btn primary" data-a="log:search">检索</button>
+        <div class="card-head"><div class="t"><h3>日志检索</h3><small>只追加，不可删除</small></div></div>
+        <div class="form-grid">
+          <label><span>模块</span><select id="lm">${opts}</select></label>
+          <label class="fg-full"><span>关键词</span>
+            <input id="lq" maxlength="30" placeholder="账号 / 对象 / 动作" value="${esc(this.d.logQ || '')}">
+          </label>
         </div>
-        <p class="hint">共七类：账号操作、会话、兑换、弟子行为、剧情、对战、存档变更；开关与赛季变更另有记录。</p>
+        <div class="adm-acts">
+          <button class="btn primary" data-a="log:search">检索</button>
+          <p class="hint">共七类：账号操作、会话、兑换、弟子行为、剧情、对战、存档变更；开关与赛季变更另有记录。</p>
+        </div>
       </div>
       <div class="card">
         <div class="card-head"><div class="t"><h3>记录</h3><small>最近 ${(this.d.logs || []).length} 条</small></div></div>
@@ -530,35 +612,39 @@ export const Admin = {
     const st = this.d.settings || {};
     const sec = st.security || {};
     return `<div class="stack">
+      ${this.head('设置', '公告与安全策略。改动即时对所有账号生效。')}
       <div class="card">
         <div class="card-head"><div class="t"><h3>公告</h3><small>显示在玩家端主界面顶部，不超过 200 字</small></div></div>
-        <label class="field"><span>公告内容（留空则隐藏）</span>
-          <textarea id="ann" rows="3" maxlength="200">${esc(st.announcement || '')}</textarea>
-        </label>
+        <div class="form-grid">
+          <label class="fg-full"><span>公告内容（留空则隐藏）</span>
+            <textarea id="ann" rows="3" maxlength="200">${esc(st.announcement || '')}</textarea>
+          </label>
+        </div>
       </div>
       <div class="card">
         <div class="card-head"><div class="t"><h3>安全策略</h3><small>全局生效，改动即时影响所有账号</small></div></div>
         <div class="form-grid">
-          <label class="field"><span>单账号同时在线设备（0 = 不限）</span>
+          <label><span>单账号同时在线设备（0 = 不限）</span>
             <select id="maxDev">${[0, 1, 2, 3, 4, 5].map((n) => `<option value="${n}" ${Number(sec.maxDevices || 0) === n ? 'selected' : ''}>${n === 0 ? '不限' : n + ' 台'}</option>`).join('')}</select>
           </label>
-          <label class="field"><span>登录失败锁定阈值（次）</span>
+          <label><span>登录失败锁定阈值（次）</span>
             <select id="lockTh">${[3, 4, 5, 6, 7, 8, 9, 10].map((n) => `<option value="${n}" ${Number(sec.lockThreshold || 5) === n ? 'selected' : ''}>${n}</option>`).join('')}</select>
           </label>
-          <label class="field"><span>令牌有效期（小时）</span>
+          <label><span>令牌有效期（小时）</span>
             <input id="tokH" type="number" min="2" max="720" value="${Number(sec.tokenHours || 168)}">
           </label>
         </div>
-        <div class="row" style="margin-top:12px">
+        <div class="adm-acts">
           <button class="btn primary" data-a="set:save">保存策略</button>
+          <p class="hint">收紧同时在线设备数后，新登录会挤掉最早的会话；登录失败达到阈值后账号临时锁定十五分钟，可在账号页解锁。改密使全部会话立即失效，该项不可配置。</p>
         </div>
-        <p class="hint">收紧同时在线设备数后，新登录会挤掉最早的会话；登录失败达到阈值后账号临时锁定十五分钟，可在账号页解锁。改密使全部会话立即失效，该项不可配置。</p>
       </div>
     </div>`;
   },
 
   noticeHtml() {
     return `<div class="stack">
+      ${this.head('须知', '后台的边界与危险操作分级。')}
       <div class="card">
         <div class="card-head"><div class="t"><h3>后台边界</h3><small>这七件事不做</small></div></div>
         <p class="hint">· 不直接修改玩家资源数量<br>

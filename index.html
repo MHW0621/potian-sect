@@ -89,19 +89,18 @@
         <h2>宗门管理台</h2>
         <p class="sub" id="adminWho">—</p>
       </div>
-      <button class="btn ghost" id="btnAdminBack">返回</button>
+      <div class="adm-search">
+        <input id="admSearch" type="search" maxlength="24" placeholder="搜账号 / 宗门名，回车直达" autocomplete="off">
+        <button class="btn ghost" id="btnAdminBack">返回</button>
+      </div>
     </header>
     <div class="tabs scroll-x" id="adminTabs" role="tablist">
-      <button class="tab is-on" data-atab="overview">总览</button>
-      <button class="tab" data-atab="accounts">账号</button>
+      <button class="tab is-on" data-atab="overview">概览</button>
+      <button class="tab" data-atab="people">账号与玩家</button>
       <button class="tab" data-atab="saves">存档</button>
-      <button class="tab" data-atab="players">玩家数据</button>
-      <button class="tab" data-atab="codes">兑换码</button>
+      <button class="tab" data-atab="codes">发放与码</button>
       <button class="tab" data-atab="season">赛季</button>
-      <button class="tab" data-atab="switches">开关</button>
-      <button class="tab" data-atab="logs">日志</button>
-      <button class="tab" data-atab="settings">设置</button>
-      <button class="tab" data-atab="notice">须知</button>
+      <button class="tab" data-atab="system">系统</button>
     </div>
     <div id="adminStage"></div>
   </div>

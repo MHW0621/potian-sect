@@ -374,6 +374,42 @@ function startGame(row, revision) {
       const req = newReqId();
       cloud.matterAct(save.slot, req, ref, action, note).catch(() => {});
     },
+    /* 赐名：改完即落盘，并回写云端 */
+    renameDisciple: (id, name) => {
+      const r = game.renameDisciple(id, name);
+      if (r.ok) { state.dirty = true; autoSave(); UI.renderPanel(true); UI.syncScene(); }
+      return r;
+    },
+    /* 第九步册封：唯祖师可定 */
+    enshrine: (id) => {
+      const r = game.enshrine(id);
+      if (r.ok) { state.dirty = true; autoSave(); UI.renderPanel(true); UI.syncScene(); }
+      return r;
+    },
+    /* 传功：亲传自降一境，把修为渡给后辈 */
+    passOn: (fromId, toId) => {
+      const r = game.passOn(fromId, toId);
+      if (r.ok) { state.dirty = true; autoSave(); UI.renderPanel(true); UI.syncScene(); }
+      return r;
+    },
+    /* 镇山：亲传驻守山门 */
+    setGuard: (id, on) => {
+      const r = game.setGuard(id, on);
+      if (r.ok) { state.dirty = true; autoSave(); UI.renderPanel(true); }
+      return r;
+    },
+    /* 阁中无人时，祖师一指派人 */
+    forceQuorum: () => {
+      const r = game.forceQuorum();
+      if (r.ok) { state.dirty = true; autoSave(); UI.renderPanel(true); }
+      return r;
+    },
+    /* 追责：把某一类政务收回祖师亲裁 */
+    reviewAuto: (key) => {
+      const r = game.reviewAuto(key);
+      if (r.ok) { state.dirty = true; autoSave(); UI.renderPanel(true); UI.syncScene(); }
+      return r;
+    },
     /* 施政策略写入服务端，跨端一致 */
     syncPolicy: (p) => cloud.policySet(save.slot, p).catch(() => {}),
   };
@@ -403,6 +439,9 @@ function startGame(row, revision) {
 }
 
 let loopTick = 0;
+let panelSig = '';
+let panelAt = 0;
+
 function loop() {
   const g = state.game;
   if (!g || g.save.ended) return;
@@ -412,7 +451,17 @@ function loop() {
   state.dirty = true;
   loopTick++;
   UI.renderTop();
-  if (loopTick % 4 === 0 && UI.isLive()) UI.renderPanel();
+  /* 事件驱动：数据变了才刷；另加 8 秒兜底，防止有字段漏进指纹 */
+  if (UI.isLive()) {
+    const sig = UI.panelSignature();
+    const now = Date.now();
+    /* 数据变了才刷，但最快 1.2 秒一次：免得忙时把 DOM 刷成跑马灯 */
+    if ((sig !== panelSig && now - panelAt > 1200) || now - panelAt > 8000) {
+      panelSig = sig;
+      panelAt = now;
+      UI.renderPanel();
+    }
+  }
   /* 场景：状态字段变更后两秒内重绘（弟子位置、建筑光晕随状态走） */
   if (loopTick % 8 === 0) UI.syncScene();
   /* 状态变化才让顶栏红点跟上，避免每帧重排 DOM */
@@ -504,24 +553,56 @@ function bindGameChromeOnce() {
   });
 }
 
-/* ---------- 招收 ---------- */
-function recruit(kind) {
+/* ---------- 招收 ----------
+ * 三种口径：
+ *   formal / servant —— 逐个收，按人头扣费（祖师亲收，可指定数量与赐名）
+ *   batch            —— 一次开山，按根骨分流入正式与杂役
+ * 门派不设名额上限，能不能收只看粮秣与灵石。
+ */
+function recruit(opts) {
   const g = state.game;
   if (!g) return;
+  const o = typeof opts === 'string' ? { kind: opts } : (opts || {});
+  const kind = o.kind || 'formal';
+  const count = Math.max(1, Math.min(RECRUIT.manual.max, Math.round(Number(o.count) || 1)));
+  const surname = String(o.surname || '').trim().slice(0, 2);
+  const generation = String(o.generation || '').trim().slice(0, 1);
+
+  if (kind === 'batch') {
+    const r = g.recruitBatch({ count, surname, generation });
+    if (!r.ok) return toast(r.msg || '开山失败');
+    UI.pushMsg(`祖师亲开山门：收 ${r.total} 人（正式 ${r.formal} · 杂役 ${r.servant}）`, 'good');
+    UI.syncScene(); UI.renderPanel(true);
+    state.dirty = true; autoSave();
+    return;
+  }
+
   const def = RECRUIT[kind] || RECRUIT.formal;
-  const cap = g.cap();
-  if (g.save.disciples.length >= cap) return toast(`小世界仅能容纳 ${cap} 人，先开辟更高层`);
-  for (const [k, v] of Object.entries(def.cost)) {
-    if ((g.save.res[k] || 0) < v) return toast(`${{ lingshi: '灵石', liangshi: '粮食' }[k] || k}不足，需 ${v}`);
+  const per = def.cost;
+  const room = Math.min(...Object.entries(per).map(([k, v]) => Math.floor((g.save.res[k] || 0) / v)));
+  const n = Math.min(count, Math.max(0, room));
+  if (n <= 0) {
+    const lack = Object.entries(per)
+      .filter(([k, v]) => (g.save.res[k] || 0) < v)
+      .map(([k]) => ({ lingshi: '灵石', liangshi: '粮食' }[k] || k)).join('、');
+    return toast(`${lack}不足，连一个人也收不起`);
   }
-  g.addRes(Object.fromEntries(Object.entries(def.cost).map(([k, v]) => [k, -v])));
-  const d = g.addDisciple(kind === 'servant' ? 'servant' : (Math.random() < 0.12 ? 'genius' : 'formal'));
-  if (!d) {
-    /* 兜底：人数已满时把消耗退回去，不留半截状态 */
-    g.addRes(def.cost);
-    return toast('山门已满，未能入门');
+
+  let made = 0;
+  for (let i = 0; i < n; i++) {
+    g.addRes(Object.fromEntries(Object.entries(per).map(([k, v]) => [k, -v])));
+    const d = g.addDisciple(kind === 'servant' ? 'servant' : (Math.random() < 0.12 ? 'genius' : 'formal'), {
+      surname: surname || undefined,
+      generation: generation || undefined,
+    });
+    if (d) made++;
   }
-  UI.pushMsg(kind === 'servant' ? `${d.name} 入宗为杂役。` : `${d.name} 通过查验，入宗为正式弟子。`, kind === 'servant' ? 'info' : 'good');
+  if (!made) return toast('未能入门');
+  const who = kind === 'servant' ? '杂役' : '正式弟子';
+  UI.pushMsg(n < count
+    ? `资源只够收 ${made} 名${who}（本想收 ${count} 名）。`
+    : `${made} 名${who}入宗${surname ? `，皆姓${surname}` : ''}${generation ? `，${generation}字辈` : ''}。`,
+  kind === 'servant' ? 'info' : 'good');
   UI.syncScene();
   UI.renderPanel(true);
   state.dirty = true;

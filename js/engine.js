@@ -5,7 +5,8 @@ import {
   VERSION, REALMS, REALM_MAX, SERVANT_REALM_CAP, STEPS, SPIRIT_ROOTS, PHYSIQUES,
   TECHNIQUES, TECH_BY_KEY, RESOURCES, RES_BY_KEY, FACILITIES, INSTITUTIONS, LAYERS,
   REGIONS, MISSION_TEMPLATES, RANDOM_EVENTS, ENDINGS, FACTIONS, SURNAMES, GIVEN_1, GIVEN_2,
-  NAMED_BACKGROUNDS, OFFLINE_CAP_DAYS,
+  NAMED_BACKGROUNDS, OFFLINE_CAP_DAYS, RECRUIT, HEIR, ELDER, AREAS, AREA_BY_KEY,
+  DAOHAO_HEAD, DAOHAO_BODY, DAOHAO_TAIL, DAOHAO_MIN_STEP,
 } from './config.js';
 import { STORY_NODES, STORY_BY_ID } from './story.js';
 
@@ -14,6 +15,9 @@ export const rnd = (a, b) => a + Math.random() * (b - a);
 export const ri = (a, b) => Math.floor(rnd(a, b + 1));
 export const pick = (arr) => arr[Math.floor(Math.random() * arr.length)];
 export const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+/* 灵根与体质是定表，每次 find 扫一遍是纯浪费，做成查找表 */
+const ROOT_BY_KEY = Object.fromEntries(SPIRIT_ROOTS.map((r) => [r.key, r]));
+const PHYS_BY_KEY = Object.fromEntries(PHYSIQUES.map((p) => [p.key, p]));
 export function weighted(arr, key = 'w') {
   const total = arr.reduce((s, x) => s + (x[key] ?? 1), 0);
   let r = Math.random() * total;
@@ -23,27 +27,43 @@ export function weighted(arr, key = 'w') {
 const emptyRes = () => Object.fromEntries(RESOURCES.map((r) => [r.key, 0]));
 
 /* ---------- 姓名 ---------- */
-export function genName() {
-  const s = pick(SURNAMES);
-  return Math.random() < 0.55 ? s + pick(GIVEN_1) + pick(GIVEN_2) : s + pick(GIVEN_1);
+export function genName(surname, generation) {
+  const s = surname || pick(SURNAMES);
+  /* 字辈：同一批弟子共用一个中间字，读起来像同门 */
+  const g = generation || pick(GIVEN_1);
+  return Math.random() < 0.62 ? s + g + pick(GIVEN_2) : s + g;
+}
+
+/* 道号：内门以上的体面，第七步起才有 */
+export function genDaohao() {
+  return pick(DAOHAO_HEAD) + pick(DAOHAO_BODY) + pick(DAOHAO_TAIL);
 }
 
 /* ---------- 弟子工厂 ---------- */
 let uid = Date.now() % 100000;
 const nextId = () => ++uid;
 
-function makeDisciple(kind) {
+function makeDisciple(kind, opts = {}) {
   const isNamed = kind === 'named';
-  const root = weighted(SPIRIT_ROOTS);
+  /* rare：天资拔高，用于天才与亲传候选 */
+  const root = opts.rootKey
+    ? (SPIRIT_ROOTS.find((r) => r.key === opts.rootKey) || weighted(SPIRIT_ROOTS))
+    : opts.rare
+      ? weighted(SPIRIT_ROOTS.filter((r) => r.mul >= 1.3))
+      : weighted(SPIRIT_ROOTS);
   const phys = weighted(PHYSIQUES);
   let type = kind === 'servant' || kind === 'servant_std' ? 'servant' : 'formal';
   if (kind === 'genius') type = 'formal';
-  const realm = type === 'servant' ? ri(1, 3) : ri(4, 5);
-  const step = type === 'servant' ? 0 : (realm <= 4 ? 1 : realm <= 6 ? 2 : 3);
+  if (opts.type) type = opts.type;
+  const realm = opts.realm || (type === 'servant' ? ri(1, 3) : ri(4, 5));
+  const step = opts.step != null ? opts.step : (type === 'servant' ? 0 : (realm <= 4 ? 1 : realm <= 6 ? 2 : 3));
   const bg = isNamed ? pick(NAMED_BACKGROUNDS) : null;
   const d = {
     id: nextId(),
-    name: genName(),
+    name: opts.name || genName(opts.surname, opts.generation),
+    /* 道号不是名字，是身份：第七步（内门）以上才有，可被祖师另行赐下 */
+    daohao: opts.daohao !== undefined ? opts.daohao
+      : (type !== 'servant' && step >= DAOHAO_MIN_STEP ? genDaohao() : null),
     type,
     named: isNamed,
     bg: bg ? bg.key : null,
@@ -85,6 +105,12 @@ export class Game {
     this.save = save;
     this.hooks = hooks; // { onMsg, onStory, onDirty, onLog, modules }
     this._msgQueue = [];
+    this._grp = null;
+    this._idx = null;
+    this._maxStep = null;
+    this._heirN = null;
+    this._sm = null;
+    this._smKey = null;
     this.mod = Object.assign(
       { battle: true, rank: true, prod: true, story: true, world: true, tasks: true, org: true },
       hooks.modules || {}
@@ -118,11 +144,11 @@ export class Game {
       battle: { atk: [], def: [], reports: [], lastChallenge: -999 },
       flags: {},
       stats: { recruited: 0, broke: 0, wins: 0, losses: 0, peakStep: 1 },
-      settings: { autoBreak: true, autoRecruit: true, sound: false },
+      settings: { autoBreak: true, autoRecruit: true, sound: false, recruitFee: false, heirStipend: true },
       /* V1.4：破天阁施政策略（宽纵 / 均衡 / 严苛）与自决范围 */
       policy: {
         stance: 'balanced',
-        areas: { seat: true, recruit: true, heal: true, prod: true },
+        areas: Object.fromEntries(AREAS.map((a) => [a.key, true])),
         recruit: { minRoot: 'fan' },
         laws: { morning: true, curfew: false, bounty: false },
       },
@@ -132,23 +158,109 @@ export class Game {
       createdAt: Date.now(),
       lastTick: Date.now(),
     };
-    return new Game(save);
+    const g = new Game(save);
+    g.seedDisciples();
+    return g;
   }
 
   /* ---------- 基础存取 ---------- */
   get s() { return this.save; }
+
+  /* ---------- 开宗铺底 ----------
+   * 新宗不能是空山：一到八步每一档都有人，第一次选拔、第一次任务都有人可用。
+   * 第九步故意留空 —— 亲传只能祖师亲册，开局就送，册封这个动作就没意义了。
+   */
+  seedDisciples() {
+    const s = this.save;
+    if (s.disciples.length) return;
+    /* 人数按境界倒着递减，越往上越少，看得出宗门是有建制的 */
+    const plan = [
+      { step: 1, n: 12 },
+      { step: 2, n: 8 },
+      { step: 3, n: 6 },
+      { step: 4, n: 4 },
+      { step: 5, n: 3 },
+      { step: 6, n: 2 },
+      { step: 7, n: 1 },
+      { step: 8, n: 2 },
+    ];
+    for (const p of plan) {
+      const si = STEPS[p.step - 1];
+      for (let i = 0; i < p.n; i++) {
+        /* 同档里修为有高有低，不要一水儿贴着下界 */
+        const realm = clamp(ri(si.realmFrom, si.realmTo), 1, REALM_MAX);
+        const d = makeDisciple('formal', { type: 'formal', realm, step: p.step });
+        d.age = 14 + (p.step - 1) * 4 + ri(0, 12);
+        d.life = baseLife(d);
+        /* 起步的人忠诚略高，避免开局就有人跑 */
+        d.loyalty = ri(60, 86);
+        this.pushDisciple(d);
+      }
+    }
+    /* 杂役：粗活总得有人干，八个够撑起灵田与工坊 */
+    for (let i = 0; i < 8; i++) {
+      const d = makeDisciple('servant', { type: 'servant' });
+      d.age = ri(14, 32);
+      d.life = baseLife(d);
+      d.loyalty = ri(60, 86);
+      this.pushDisciple(d);
+    }
+    /* 阁老先落两席：两名第八步正好填上，第一天阁中就能议事 */
+    const seats = this._ensureSeats();
+    let put = 0;
+    for (const d of this.formal()) {
+      if (put >= seats.length - 1) break;
+      if (d.step !== 8) continue;
+      seats[put] = d.id;
+      d.state = 'post';
+      put++;
+    }
+    this._touchDisc();
+  }
+
   realmInfo(d) { return REALMS[clamp(d.realm, 1, REALM_MAX) - 1]; }
   need(d) { return this.realmInfo(d).need; }
   stepInfo(step) { return STEPS[clamp(step, 1, 9) - 1]; }
   stepTitle(d) { return d.type === 'servant' ? `${d.star}星杂役` : this.stepInfo(d.step).title; }
-  rootOf(d) { return SPIRIT_ROOTS.find((r) => r.key === d.root) || SPIRIT_ROOTS[0]; }
-  physOf(d) { return PHYSIQUES.find((p) => p.key === d.phys) || PHYSIQUES[0]; }
+  rootOf(d) { return ROOT_BY_KEY[d.root] || SPIRIT_ROOTS[0]; }
+  physOf(d) { return PHYS_BY_KEY[d.phys] || PHYSIQUES[0]; }
   techOf(d) { return d.tech ? TECH_BY_KEY[d.tech] : null; }
-  formal() { return this.save.disciples.filter((d) => d.type === 'formal'); }
-  servants() { return this.save.disciples.filter((d) => d.type === 'servant'); }
-  staff() { return this.save.disciples.filter((d) => d.type === 'staff'); }
-  byId(id) { return this.save.disciples.find((d) => d.id === id); }
-  maxStep() { return this.formal().reduce((m, d) => Math.max(m, d.step), 0); }
+
+  /* 分组与索引：弟子可达数千，每次 filter/find 都是全表扫，必须缓存。
+   * 任何增删弟子都必须调 _touchDisc()，否则缓存会指到已删的人身上。
+   * 亲传人数也在每日修炼里被读，同样要缓存，否则 O(n²)。 */
+  _touchDisc() { this._grp = null; this._idx = null; this._maxStep = null; this._heirN = null; }
+  _groups() {
+    if (this._grp) return this._grp;
+    const formal = [], servant = [], staff = [];
+    for (const d of this.save.disciples) {
+      if (d.type === 'formal') formal.push(d);
+      else if (d.type === 'servant') servant.push(d);
+      else if (d.type === 'staff') staff.push(d);
+    }
+    this._grp = { formal, servant, staff };
+    return this._grp;
+  }
+  _index() {
+    if (this._idx) return this._idx;
+    const m = new Map();
+    for (const d of this.save.disciples) m.set(d.id, d);
+    this._idx = m;
+    return m;
+  }
+  /* 返回内部数组的副本再排序，避免调用方 sort 污染缓存 */
+  formal() { return this._groups().formal; }
+  servants() { return this._groups().servant; }
+  staff() { return this._groups().staff; }
+  byId(id) { return this._index().get(id) || null; }
+  maxStep() {
+    if (this._maxStep == null) {
+      let m = 0;
+      for (const d of this._groups().formal) if (d.step > m) m = d.step;
+      this._maxStep = m;
+    }
+    return this._maxStep;
+  }
 
   /* ---------- 消息 ---------- */
   msg(text, type = 'info') {
@@ -168,19 +280,25 @@ export class Game {
   }
   stance() { return this.policy().stance || 'balanced'; }
   law(k) { const l = this.policy().laws || {}; return !!l[k]; }
-  /* 三档倾向对修炼、产出、突破、忠诚、心魔的乘数/增量 */
+  /* 三档倾向对修炼、产出、突破、忠诚、心魔的乘数/增量。
+   * 每日每弟子都要读它，按档位缓存一份，别在循环里反复建对象。 */
   stanceMul() {
-    return {
+    const st = this.stance();
+    if (this._sm && this._smKey === st) return this._sm;
+    const table = {
       lenient: { gain: 0.97, prod: 0.94, break_: 0.0, loyalty: 0.02, demon: 0.94, name: '宽纵' },
       balanced: { gain: 1, prod: 1, break_: 0, loyalty: 0, demon: 1, name: '均衡' },
       strict: { gain: 1.05, prod: 1.08, break_: 0.01, loyalty: -0.02, demon: 1.08, name: '严苛' },
-    }[this.stance()] || { gain: 1, prod: 1, break_: 0, loyalty: 0, demon: 1, name: '均衡' };
+    };
+    this._smKey = st;
+    this._sm = table[st] || table.balanced;
+    return this._sm;
   }
   setPolicy(patch) {
     const p = this.policy();
     this.save.policy = {
       stance: patch.stance || p.stance || 'balanced',
-      areas: Object.assign({ seat: true, recruit: true, heal: true, prod: true }, p.areas, patch.areas || {}),
+      areas: Object.assign(Object.fromEntries(AREAS.map((a) => [a.key, true])), p.areas, patch.areas || {}),
       recruit: Object.assign({ minRoot: 'fan' }, p.recruit, patch.recruit || {}),
       laws: Object.assign({ morning: true, curfew: false, bounty: false }, p.laws, patch.laws || {}),
     };
@@ -224,17 +342,135 @@ export class Game {
     if (worst) worst.demon = clamp(worst.demon - v, 0, 100);
   }
 
-  /* ---------- 招收 ---------- */
-  cap() { return 10 + this.save.layers * 6; }
+  /* ---------- 招收 ----------
+   * 门派不设名额上限：来多少人由粮秣与资源自然调节。
+   * 招收分三路：两年一次的开山（自动、上百人）、祖师亲收（随时、可指定数量与赐名）、
+   * 以及阁中零星补人（自治）。三条路都走 pushDisciple，保证计数与统计一致。
+   */
+  cap() { return Infinity; }
 
-  addDisciple(kind = 'servant') {
-    if (this.save.disciples.length >= this.cap()) return null;
-    const d = makeDisciple(kind);
+  pushDisciple(d) {
     d.joinedDay = this.save.day;
     this.save.disciples.push(d);
     this.save.stats.recruited++;
+    this._touchDisc();
     return d;
   }
+
+  addDisciple(kind = 'servant', opts) {
+    return this.pushDisciple(makeDisciple(kind, opts));
+  }
+
+  /* 一次开山：先抽根骨，再按资质分流 —— 资质是主判据，比例只做两端夹逼。
+   * 人数硬边界 100~200，声望只决定落在区间的哪一段。
+   * 入门费默认不收；政策开了才按人计，付不起就按付得起的人数开。 */
+  recruitBatch({ count = 120, surname = '', generation = '', log = true } = {}) {
+    const s = this.save;
+    const cfg = RECRUIT.batch;
+    const out = { ok: true, total: 0, formal: 0, servant: 0, cost: {}, asked: 0, trimmed: 0 };
+
+    const ask = clamp(Math.round(count), cfg.min, cfg.max);
+    out.asked = ask;
+
+    const feeOn = s.settings.recruitFee === true;
+    let real = ask;
+    if (feeOn) {
+      const per = cfg.fee.liangshi || 0;
+      const afford = per > 0 ? Math.floor((s.res.liangshi || 0) / per) : ask;
+      if (afford <= 0) return { ok: false, msg: '粮秣不足，开不了山门', ...out };
+      if (afford < ask) out.trimmed = ask - afford;
+      real = Math.min(ask, afford);
+    }
+    out.real = real;
+    const n = real;
+
+    /* 同批弟子一个姓、一个字辈，读起来像同门 */
+    const batch = [];
+    for (let i = 0; i < n; i++) {
+      batch.push(makeDisciple('formal', { surname: surname || undefined, generation: generation || undefined }));
+    }
+
+    /* 资质分流：根骨达门槛的入正式，这是主判据 */
+    const thr = cfg.formalRootMul;
+    let fm = batch.filter((d) => this.rootOf(d).mul >= thr);
+    let sv = batch.filter((d) => this.rootOf(d).mul < thr);
+
+    /* 两端夹逼：整批全杂役或整批全天才都不像话，夹住才有"开山收徒"的样子 */
+    const lo = Math.ceil(n * cfg.formalMin);
+    const hi = Math.floor(n * cfg.formalMax);
+    if (fm.length < lo && sv.length) {
+      sv.sort((a, b) => this.rootOf(b).mul - this.rootOf(a).mul);
+      fm = fm.concat(sv.splice(0, Math.min(lo - fm.length, sv.length)));
+    } else if (fm.length > hi) {
+      fm.sort((a, b) => this.rootOf(a).mul - this.rootOf(b).mul);
+      sv = sv.concat(fm.splice(0, fm.length - hi));
+    }
+
+    /* 落档：入杂役的要真的改身份，不只是换个标签 */
+    for (const d of sv) {
+      d.type = 'servant';
+      d.step = 0;
+      d.star = 1;
+      d.tech = null;
+      d.daohao = null;
+      d.realm = clamp(d.realm, 1, SERVANT_REALM_CAP);
+      d.state = 'cultivate';
+    }
+
+    for (const d of batch) this.pushDisciple(d);
+    out.formal = fm.length;
+    out.servant = sv.length;
+    out.total = batch.length;
+    out.ratio = batch.length ? +(fm.length / batch.length).toFixed(2) : 0;
+
+    if (feeOn && out.total) {
+      const per = cfg.fee.liangshi || 0;
+      const fp = cfg.formalFee.lingshi || 0;
+      s.res.liangshi = Math.max(0, (s.res.liangshi || 0) - per * out.total);
+      s.res.lingshi = Math.max(0, (s.res.lingshi || 0) - fp * out.formal);
+      out.cost.liangshi = +(per * out.total).toFixed(1);
+      out.cost.lingshi = +(fp * out.formal).toFixed(1);
+    }
+
+    if (log && out.total) {
+      this.chronicle('recruit', '山门大开', `${out.formal} 正 · ${out.servant} 役`,
+        `${surname ? `${surname}氏` : '四方'}来投 ${out.total} 人，验根骨后 ${out.formal} 人入正式、${out.servant} 人入杂役。`);
+      this.msg(`山门大开：收 ${out.total} 人（正式 ${out.formal} · 杂役 ${out.servant}）`, 'good');
+    }
+    return out;
+  }
+
+  /* 赐名 / 赐道号：祖师可给任何弟子改名，记入宗门史，并带一点人情数值。
+   * input 既接受字符串（旧调用只改名），也接受 { name, daohao }。
+   * 道号是内门以上的体面，第七步起才赐；名字谁都可以改。 */
+  renameDisciple(id, input) {
+    const d = this.byId(id);
+    if (!d) return { ok: false, msg: '查无此人' };
+    const patch = typeof input === 'string' ? { name: input } : (input || {});
+    const name = patch.name != null ? String(patch.name).trim().slice(0, 12) : '';
+    const daohao = patch.daohao != null ? String(patch.daohao).trim().slice(0, 12) : '';
+    if (!name && !daohao) return { ok: false, msg: '名字与道号不能都空着' };
+    const canDaohao = d.step >= DAOHAO_MIN_STEP || d.type === 'staff';
+    if (daohao && !canDaohao) return { ok: false, msg: `道号是内门以上的体面，需第 ${DAOHAO_MIN_STEP} 步` };
+
+    const from = { name: d.name, daohao: d.daohao || null };
+    const changed = [];
+    if (name && name !== d.name) { changed.push(`名「${from.name}」改「${name}」`); d.name = name; }
+    if (daohao && daohao !== (d.daohao || '')) { changed.push(`号「${from.daohao || '无'}」改「${daohao}」`); d.daohao = daohao; }
+    if (!changed.length) return { ok: false, msg: '名号未变' };
+
+    /* 赐名是恩典：忠诚与声望各加一点，名正而言顺 */
+    d.renamed = (d.renamed || 0) + 1;
+    d.loyalty = clamp(d.loyalty + 4, 0, 100);
+    this.addRenown(2);
+    this.chronicle('rename', '祖师赐名', `${d.name}${d.daohao ? ` · ${d.daohao}` : ''}`,
+      `祖师亲笔，为${this.stepTitle(d)}${from.name}赐：${changed.join('，')}。`);
+    this.msg(`${from.name} 已赐${name ? `名「${name}」` : `道号「${daohao}」`}。`, 'good');
+    return { ok: true, msg: `${from.name} → ${d.name}`, from, to: { name: d.name, daohao: d.daohao } };
+  }
+
+  /* 抽一个道号给界面用，祖师可以改，也可以直接采纳 */
+  rollDaohao() { return genDaohao(); }
 
   /* ---------- 修炼速率 ---------- */
   envMul() {
@@ -249,7 +485,7 @@ export class Game {
     const slow = this.save.flags.slowUntil && this.save.day < this.save.flags.slowUntil ? 0.5 : 1;
     const sm = this.stanceMul();
     const lawMul = this.law('morning') ? 1.04 : 1;
-    return base * this.rootOf(d).mul * this.physOf(d).mul * techMul * this.envMul() * dq * slow * sm.gain * lawMul * (0.9 + REALMS[d.realm - 1].i * 0.02);
+    return base * this.rootOf(d).mul * this.physOf(d).mul * techMul * this.envMul() * dq * slow * sm.gain * lawMul * (0.9 + REALMS[d.realm - 1].i * 0.02) * this.heirBonus();
   }
 
   /* ---------- 战力 ---------- */
@@ -257,7 +493,7 @@ export class Game {
     const r = this.realmInfo(d);
     const t = this.techOf(d);
     const stepBonus = 1 + (d.step || 0) * 0.05;
-    return Math.round(r.atk * this.rootOf(d).mul * this.physOf(d).mul * (t ? 1 + t.atk : 1) * stepBonus * (1 - d.demon / 400) * (d.type === 'staff' ? 1.1 : 1));
+    return Math.round(r.atk * this.rootOf(d).mul * this.physOf(d).mul * (t ? 1 + t.atk : 1) * stepBonus * (1 - d.demon / 400) * (d.type === 'staff' ? 1.1 : 1) * (d.guard && d.step === 9 ? 1.15 : 1));
   }
   teamPower(ids) {
     const list = ids ? ids.map((i) => this.byId(i)).filter(Boolean) : this.formal();
@@ -291,26 +527,41 @@ export class Game {
     /* 声望涓流：宗门的名声随岁月累积 */
     if (day % 360 === 0) this.addRenown(Math.round(Math.sqrt(this.formal().length) * 2 + s.layers));
 
-    /* 弟子结算 */
-    for (const d of s.disciples) {
+    /* 弟子结算
+     * 门派不设人数上限，后期动辄数千人，逐日全扫必然卡。
+     * 超过 200 人时按两片轮转：每天只精算一半，增益按两日给，
+     * 数值等价，只是状态跳变最多晚一天。少于 200 人时仍逐日全算。 */
+    const all = s.disciples;
+    const total = all.length;
+    const slices = total > 200 ? 2 : 1;
+    const sliceKey = slices === 1 ? -1 : day % slices;
+    const span = slices;
+    const sm = this.stanceMul();
+    const curfewMul = this.law('curfew') ? 0.92 : 1;
+    const demonBase = 0.03 * sm.demon * curfewMul;
+    const loyalDrift = day % 10 === 0 && sm.loyalty ? sm.loyalty * 10 : 0;
+
+    for (let i = 0; i < total; i++) {
+      if (sliceKey >= 0 && i % slices !== sliceKey) continue;
+      const d = all[i];
       // 寿元
-      d.age += 1 / 365;
+      d.age += span / 365;
       if (d.age >= d.life) {
         d.dead = true;
         this.msg(`${d.name} 寿元耗尽，坐化于静室。`, 'bad');
+        continue;
       }
       if (d.state === 'injured') {
-        d.injDays--;
+        d.injDays -= span;
         if (d.injDays <= 0) d.state = 'cultivate';
         continue;
       }
       // 心魔
-      const phys = this.physOf(d);
-      const sm = this.stanceMul();
-      d.demon = clamp(d.demon + 0.03 * phys.demon * sm.demon * (this.law('curfew') ? 0.92 : 1) * (1 + d.realm * 0.05) * (this.techOf(d)?.calm ? 1 - this.techOf(d).calm : 1), 0, 100);
+      const tech = this.techOf(d);
+      d.demon = clamp(d.demon + demonBase * span * this.physOf(d).demon * (1 + d.realm * 0.05) * (tech?.calm ? 1 - tech.calm : 1), 0, 100);
       // 法度与施政带来的忠诚漂移（每十日结算一次）
-      if (day % 10 === 0 && sm.loyalty) d.loyalty = clamp(d.loyalty + sm.loyalty * 10, 0, 100);
-      if (d.demon >= 100 && Math.random() < 0.0005) {
+      if (loyalDrift) d.loyalty = clamp(d.loyalty + loyalDrift, 0, 100);
+      if (d.demon >= 100 && Math.random() < 0.0005 * span) {
         this.msg(`${d.name} 心魔爆发，修为倒退一境。`, 'bad');
         d.realm = Math.max(1, d.realm - 1);
         d.prog = 0;
@@ -318,7 +569,7 @@ export class Game {
       }
       // 修为
       if (d.state !== 'bottleneck') {
-        d.prog += this.gainPerDay(d);
+        d.prog += this.gainPerDay(d) * span;
         const need = this.need(d);
         if (d.prog >= need) {
           d.prog = need;
@@ -334,6 +585,7 @@ export class Game {
     const dead = s.disciples.filter((d) => d.dead);
     if (dead.length) {
       s.disciples = s.disciples.filter((d) => !d.dead);
+      this._touchDisc();
       for (const inst of Object.keys(s.posts)) {
         s.posts[inst] = s.posts[inst].map((id) => (dead.some((x) => x.id === id) ? null : id));
       }
@@ -353,14 +605,26 @@ export class Game {
     /* 随机事件（每 40 日一次判定） */
     if (day % 40 === 0) this._randomEvent();
 
-    /* 自动招收 */
-    if (s.settings.autoRecruit && day % 60 === 0) {
-      const cap = 6 + this.save.layers * 4;
-      if (s.disciples.length < cap && s.res.liangshi > 120) this.addDisciple('servant');
+    /* 山门大开：每两年一次。人数先随机，再按声望把分布往区间上端推，
+       硬边界仍是 100~200 —— 名声大了来的人多，但不会多到离谱 */
+    if (s.settings.autoRecruit && day % RECRUIT.batch.interval === 0) {
+      const span = RECRUIT.batch.max - RECRUIT.batch.min;
+      const fame = clamp((s.sect.renown || 0) / RECRUIT.batch.renownFull, 0, 1);
+      const lo = RECRUIT.batch.min + Math.round(span * 0.45 * fame);
+      this.recruitBatch({ count: ri(lo, RECRUIT.batch.max), log: true });
     }
 
-    /* 破天阁自治：日常与重要事务按施政策略自行处置，结果写入宗门史 */
-    if (day % 15 === 0) this._autoGovern();
+    if (day % 15 === 0) {
+      /* 断粮三级：先减供给，再走杂役，最后才轮到正式弟子 */
+      this._famine();
+      /* 席位随层数开，进层后要把数组补齐 */
+      this._ensureSeats();
+      /* 破天阁自治：日常与重要事务按施政策略自行处置，结果写入宗门史 */
+      this._autoGovern();
+    }
+
+    /* 弟子阁轮值：阁老不终身占席 */
+    if (day % ELDER.rotateDays === 0) this.rotateElder();
 
     /* 榜单同步由外部节流调用 */
   }
@@ -368,43 +632,58 @@ export class Game {
   /* ---------- 破天阁自治 ----------
    * 判定器输入：事由、候选人、当前策略；输出：处置与消耗。
    * 全部为确定性挑选（分数排序），同一事务只结算一次。
+   * 一条硬规矩：阁中无主时不等于不办事 —— 只是办得慢，绝不堆着没人管。
    */
   _autoGovern() {
     const s = this.save;
     const p = this.policy();
     const areas = p.areas || {};
     const sm = this.stanceMul();
+    const q = this.elderQuorum();
+    /* 无阁老：周期按 idleMul 拉长，事照办 */
+    if (!q.ok && Math.floor(s.day / 15) % ELDER.idleMul !== 0) return;
+    const eff = this.elderEfficiency() || 0.5;
 
     /* 一、补缺：席位空缺时由阁议推举，严苛档更积极、宽纵档更迟缓 */
     if (areas.seat !== false && this.modOpen('org') && s.day % 45 === 0) {
       const vac = [];
       for (const inst of INSTITUTIONS) {
-        s.posts[inst.key].forEach((id, i) => { if (!id) vac.push({ inst: inst.key, i, seat: inst.seats[i], name: inst.name }); });
+        const seats = inst.key === 'dizige' ? this._ensureSeats() : s.posts[inst.key];
+        seats.forEach((id, i) => {
+          if (!id || !this.byId(id)) vac.push({ inst: inst.key, i, seat: this.seatLabel(inst.key, i), name: inst.name });
+        });
       }
       if (vac.length) {
         const v = vac[0];
-        const cands = this.save.disciples.filter((d) => this.eligible(v.inst, d)
-          && !s.posts.dizige.includes(d.id) && !s.posts.hufatang.includes(d.id) && !s.posts.zhanglaohui.includes(d.id));
-        const wantRate = this.stance() === 'strict' ? 0.92 : this.stance() === 'lenient' ? 0.55 : 0.78;
-        if (cands.length && Math.random() < wantRate) {
-          cands.sort((a, b) => this.electScore(b).total - this.electScore(a).total);
-          const d = cands[0];
-          const r = this.assignSeat(v.inst, v.i, d.id);
+        /* 只挑一个最优者，不排序全表：一千人时 sort 比一趟遍历贵得多 */
+        const taken = new Set([].concat(s.posts.dizige, s.posts.hufatang, s.posts.zhanglaohui).filter(Boolean));
+        let best = null, bestScore = -Infinity;
+        for (const d of s.disciples) {
+          if (taken.has(d.id)) continue;
+          /* 弟子阁按阶梯收人；别的机构只看资格 */
+          const tier = v.inst === 'dizige' ? this.elderTier(d) : (this.eligible(v.inst, d) ? 1 : 0);
+          if (!tier) continue;
+          /* 降格任职要扣分：能不降格就不降格 */
+          const sc = this.electScore(d).total - (tier - 1) * 180;
+          if (sc > bestScore) { bestScore = sc; best = d; }
+        }
+        const wantRate = (this.stance() === 'strict' ? 0.92 : this.stance() === 'lenient' ? 0.55 : 0.78) * eff;
+        if (best && Math.random() < wantRate) {
+          const r = this.assignSeat(v.inst, v.i, best.id);
           if (r.ok) {
-            this.chronicle('auto', '破天阁·补缺', `${v.name}·${v.seat}`,
-              `依${sm.name}之政，阁议推 ${d.name} 补此席（总评 ${Math.round(this.electScore(d).total)}），未经祖师过目。`);
+            this.chronicle('auto', AREA_BY_KEY.seat.log, `${v.name}·${v.seat}`,
+              `依${sm.name}之政，阁议推 ${best.name} 补此席（总评 ${Math.round(bestScore)}），未经祖师过目。`);
           }
         }
       }
     }
 
-    /* 二、招揽：严苛档不自动收人，宽纵档更愿意收 */
+    /* 二、招揽：阁中零星补人，人数不设限，只受粮秣约束 */
     if (areas.recruit !== false && s.day % 90 === 0 && s.settings.autoRecruit) {
-      const cap = this.cap();
       const want = this.stance() === 'lenient' ? 6 : this.stance() === 'strict' ? 2 : 4;
-      if (this.servants().length < want && s.res.liangshi > 240 && s.disciples.length < cap) {
+      if (this.servants().length < want && s.res.liangshi > 240) {
         const d = this.addDisciple('servant');
-        if (d) this.chronicle('auto', '破天阁·招揽', '杂役', `${d.name} 由阁中自行招入，月给口粮，未惊动祖师。`);
+        if (d) this.chronicle('auto', AREA_BY_KEY.recruit.log, '杂役', `${d.name} 由阁中自行招入，月给口粮，未惊动祖师。`);
       }
     }
 
@@ -413,10 +692,104 @@ export class Game {
       const healed = s.disciples.filter((d) => d.state === 'injured' && d.injDays <= 0);
       for (const d of healed) d.state = 'cultivate';
       if (healed.length) {
-        this.chronicle('auto', '破天阁·疗养', `${healed.length} 人`,
+        this.chronicle('auto', AREA_BY_KEY.heal.log, `${healed.length} 人`,
           `${healed.map((d) => d.name).join('、')} 伤愈归队，已复入日常课业。`);
       }
     }
+
+    /* 四、分派：阁中按例派人做任务，不必祖师点名。
+       挑的是战力最低的那几个闲人 —— 好苗子留着修炼，跑腿的活轮不到他们。 */
+    if (areas.assign !== false && this.modOpen('tasks') && s.day % 90 === 0) {
+      if (s.missions.length < 3) {
+        const pool = this._idleFormal();
+        const tpl = this.missionsAvailable().slice().reverse().find((t) => t.need <= pool.length);
+        if (tpl) {
+          /* 战力低的先去：按 power 取前 need 个 */
+          const pickIds = pool.slice(0, tpl.need).map((d) => d.id);
+          const r = this.startMission(tpl.key, pickIds);
+          if (r.ok) {
+            this.chronicle('auto', AREA_BY_KEY.assign.log, tpl.name,
+              `阁中按例派出 ${pickIds.length} 人接【${tpl.name}】，${tpl.days} 日后归来。`);
+          }
+        }
+      }
+    }
+
+    /* 五、营建：库房有余才动土，且一次只起一处，免得把家底掏空 */
+    if (areas.build !== false && s.day % 180 === 0 && this.stance() !== 'lenient') {
+      let best = null, bestLv = 99;
+      for (const f of FACILITIES) {
+        const lv = s.fac[f.key] || 0;
+        if (lv >= f.maxLv) continue;
+        const cost = this.buildCost(f.key);
+        const afford = Object.entries(cost).every(([k, v]) => (s.res[k] || 0) >= v * 2.4);
+        if (afford && lv < bestLv) { bestLv = lv; best = f; }
+      }
+      if (best) {
+        const r = this.build(best.key);
+        if (r.ok) {
+          this.chronicle('auto', AREA_BY_KEY.build.log, best.name,
+            `库房有余，阁中排期营建，${best.name} 升至 ${s.fac[best.key]} 级。`);
+        }
+      }
+    }
+
+    /* 六、转职：晋升无望的老弟子转任执事，腾出修炼位，也给机构添人手 */
+    if (areas.turn !== false && s.day % 300 === 0 && this.staff().length < 6) {
+      let old = null;
+      for (const d of this.formal()) {
+        if (d.step < 4 || d.step >= 7) continue;
+        if (d.age < 45 || d.gongxian < 30) continue;
+        if (!old || d.gongxian > old.gongxian) old = d;
+      }
+      if (old) {
+        const r = this.convert(old.id, 'hufatang');
+        if (r.ok) {
+          this.chronicle('auto', AREA_BY_KEY.turn.log, old.name,
+            `${old.name} 年过四十五、久不进阶，阁中商定转任执事，不再占修炼位。`);
+        }
+      }
+    }
+
+    /* 七、刑赏：门规小过由阁中处置，不用事事请裁。
+       手段只到"闭门思过"一级，逐出与处决仍归祖师。 */
+    if (areas.punish !== false && s.day % 120 === 0) {
+      let worst = null;
+      for (const d of this._groups().formal) {
+        if (d.demon < 70) continue;
+        if (!worst || d.demon > worst.demon) worst = d;
+      }
+      if (worst) {
+        worst.demon = clamp(worst.demon - 12, 0, 100);
+        worst.loyalty = clamp(worst.loyalty - 3, 0, 100);
+        this.chronicle('auto', AREA_BY_KEY.punish.log, worst.name,
+          `${worst.name} 心魔深重，阁中罚其闭门思过，心魔已降，然心中不服。`);
+      }
+    }
+  }
+
+  /* 闲置的正式弟子：战力升序，供阁中按例分派 */
+  _idleFormal() {
+    const out = [];
+    for (const d of this._groups().formal) {
+      if (d.state === 'cultivate' && d.step < 9) out.push(d);
+    }
+    out.sort((a, b) => this.power(a) - this.power(b));
+    return out;
+  }
+
+  /* 祖师追责：阁中办错了，把这一类政务收回亲裁，阁中声望受损。
+   * 撤销的是"以后再这么办"的权力，不是把已经办的事倒回去 —— 事已至此，改不了。 */
+  reviewAuto(key) {
+    const a = AREA_BY_KEY[key];
+    if (!a) return { ok: false, msg: '无此类政务' };
+    if (this.policy().areas[key] === false) return { ok: false, msg: `${a.name}已归祖师亲裁` };
+    this.setPolicy({ areas: { [key]: false } });
+    this.addRenown(-6);
+    this.chronicle('review', '祖师追责', a.name,
+      `祖师以阁中${a.name}处置失当，收回此权，仍归亲裁。阁中声望受损。`);
+    this.msg(`已收回${a.name}之权，改由祖师亲裁。`, 'story');
+    return { ok: true, msg: `${a.name}已收回亲裁` };
   }
 
   _checkStage() {
@@ -475,7 +848,7 @@ export class Game {
       liangshi: Math.max(gross.liangshi * 0.86, s.disciples.length * 0.16),
       lingyao: gross.lingyao * 0.75,
       danyao: Math.max(gross.danyao * 0.8, fm * 0.03),
-      lingshi: gross.lingshi * (0.8 + renownRate) + realmSum * 0.004,
+      lingshi: gross.lingshi * (0.8 + renownRate) + realmSum * 0.004 + this.heirStipendPerDay(),
       qicai: gross.qicai * 0.72,
       fulu: gross.fulu * 0.72,
       zhenfa: gross.zhenfa * 0.72,
@@ -488,21 +861,60 @@ export class Game {
       s.res[k] = Math.max(0, +((s.res[k] || 0) + net).toFixed(2));
     }
 
-    /* 断粮：弟子开始下山 */
-    if (s.res.liangshi <= 0.5 && s.disciples.length && s.day % 150 === 0) {
-      this.msg('粮仓见底，弟子开始有人下山。', 'bad');
-      const leave = this.servants().slice(0, 2).concat(this.formal().slice(0, 1));
-      for (const d of leave) {
-        s.disciples = s.disciples.filter((x) => x.id !== d.id);
-        this.msg(`${d.name} 不告而别。`, 'bad');
-      }
-    }
-
     /* 纳贡 */
     if (s.flags.tribute && s.day % 360 === 0) {
       this.addRes({ lingshi: -Math.min(s.res.lingshi * 0.1, 600) });
     }
+
+    /* 断粮由 _famine() 分三级处置，这里只结算收支 */
   }
+
+  /* ---------- 断粮三级 ----------
+   * 一级：供给下调，修炼效率腰斩，还撑得住；
+   * 二级：杂役开始下山（他们最先感知粮仓见底）；
+   * 三级：正式弟子离开。
+   * 为什么分级：一断粮就成批赶人，玩家会觉得是系统在惩罚，而不是自己在经营。
+   */
+  _famine() {
+    const s = this.save;
+    if (s.res.liangshi > 0.5) {
+      if (s.flags.famine) {
+        s.flags.famine = 0;
+        delete s.flags.famineDay;
+        this.msg('粮仓回满，供给恢复如常。', 'good');
+      }
+      return;
+    }
+    s.flags.famineDay = s.flags.famineDay || s.day;
+    const held = s.day - s.flags.famineDay;
+    let lvl = s.flags.famine || 1;
+    /* 一级：先削供给，别急着赶人 */
+    s.flags.slowUntil = Math.max(s.flags.slowUntil || 0, s.day + 120);
+    if (lvl < 2 && held >= 120) {
+      lvl = 2;
+      this.msg('粮仓见底逾月，杂役开始有人下山。', 'bad');
+    }
+    if (lvl < 3 && held >= 240) {
+      lvl = 3;
+      this.msg('供给断绝太久，正式弟子也留不住了。', 'bad');
+    }
+    s.flags.famine = lvl;
+    /* 一级只削供给，不赶人 —— 刚见底就开始打发弟子，玩家会觉得是系统在撒气 */
+    if (lvl < 2) return;
+    if (s.day % 60 !== 0 || !s.disciples.length) return;
+
+    const pool = lvl >= 3 ? this.formal() : this.servants();
+    if (!pool.length) return;
+    const leave = pool.slice(0, lvl >= 3 ? 1 : 2);
+    for (const d of leave) {
+      s.disciples = s.disciples.filter((x) => x.id !== d.id);
+      for (const k of Object.keys(s.posts)) s.posts[k] = s.posts[k].map((x) => (x === d.id ? null : x));
+      this.msg(`${d.name} 不告而别。`, 'bad');
+      this.chronicle('famine', '断粮', `${d.name} 下山`, `粮秣断绝，${this.stepTitle(d)}${d.name}自行离山。`);
+    }
+    this._touchDisc();
+  }
+
 
   _tickJobs() {
     const s = this.save;
@@ -670,6 +1082,254 @@ export class Game {
     return this.power(d) * 0.5 + d.gongxian * 2 + (100 - d.demon) * 0.6 + d.loyalty * 0.4 + (d.age - 12) * 0.5;
   }
 
+  /* ---------- 第九步 · 亲传 ----------
+   * 第九步不靠自动晋升，只能由祖师亲自册封（STEPS 标了 manual）。
+   * 门槛三条：修为已至第八步、天赋够（灵根倍率）、心魔未失控。
+   * 名额不设上限 —— 天赋只是门票，册不册封由祖师定；养不养得起是俸禄的事。
+   */
+  heirMinRoot() { return HEIR.minRoot; }
+  heirCap() { return Infinity; }
+  heirCount() {
+    if (this._heirN == null) {
+      let n = 0;
+      for (const d of this._groups().formal) if (d.step === 9) n++;
+      this._heirN = n;
+    }
+    return this._heirN;
+  }
+
+  /* 在册亲传给全宗的加成：人越多，山门气象越盛 */
+  heirBonus() { return 1 + this.heirCount() * HEIR.bonus.gain; }
+  /* 亲传俸禄：按年折算到日；政策可关（settings.heirStipend = false） */
+  heirStipendPerDay() {
+    const n = this.heirCount();
+    if (!n || this.save.settings.heirStipend === false) return 0;
+    return n * (HEIR.stipend.lingshi || 0) / 360;
+  }
+
+  /* ---------- 第九步 · 亲传的四项特权 ----------
+   * 传功   —— 把修为渡给后辈，自身降一小境，后辈升一境。亲传的分量在这儿。
+   * 代师出征 —— 可单独领队接高难任务，不必凑满人。
+   * 镇山   —— 驻守山门时战力 +15%（在 power() 里生效）。
+   * 继承   —— 宗主空缺时，由综合分最高的亲传接位。
+   */
+  canLeadSolo(d) { return !!d && d.step === 9; }
+
+  passOn(fromId, toId) {
+    if (!this.modOpen('org')) return { ok: false, msg: '机构模块未开放' };
+    const a = this.byId(fromId);
+    const b = this.byId(toId);
+    if (!a || !b) return { ok: false, msg: '查无此人' };
+    if (a.step !== 9) return { ok: false, msg: '只有亲传弟子可以传功' };
+    if (a.id === b.id) return { ok: false, msg: '不能传给自己' };
+    if (b.type !== 'formal') return { ok: false, msg: '只能传给正式弟子' };
+    if (a.realm <= STEPS[8].realmFrom) return { ok: false, msg: '亲传修为已至底线，再传便跌出九步' };
+    if (b.realm >= a.realm) return { ok: false, msg: '后辈修为不在其下，无需传功' };
+    const before = { a: a.realm, b: b.realm };
+    a.realm -= 1;
+    a.prog = 0;
+    a.life = Math.max(1, a.life - 8);
+    a.demon = clamp(a.demon + 5, 0, 100);   // 逆天改命，总要沾点因果
+    b.realm = clamp(b.realm + 1, 1, REALM_MAX);
+    b.prog = 0;
+    b.life = Math.max(b.life, baseLife(b));
+    this._touchDisc();
+    this.addRenown(5);
+    this.chronicle('passon', '亲传传功', `${a.name} → ${b.name}`,
+      `${a.name}自降一境（${before.a}→${a.realm}），将修为渡与${b.name}（${before.b}→${b.realm}）。`);
+    this.msg(`${a.name} 传功于 ${b.name}：${b.name} 至 ${this.realmInfo(b).name}。`, 'story');
+    return { ok: true, msg: `${b.name} 进境至 ${this.realmInfo(b).name}` };
+  }
+
+  /* 镇山：亲传驻守山门，战力加成在 power() 里生效 */
+  setGuard(id, on) {
+    const d = this.byId(id);
+    if (!d) return { ok: false, msg: '查无此人' };
+    if (d.step !== 9) return { ok: false, msg: '只有亲传可镇山' };
+    d.guard = on !== false;
+    d.state = d.guard ? 'guard' : 'cultivate';
+    this.chronicle('guard', '镇山', d.name, `${d.name}${d.guard ? '受命镇守山门' : '撤去镇山之责'}。`);
+    return { ok: true, msg: `${d.name} ${d.guard ? '镇山' : '撤守'}` };
+  }
+
+  /* 继承：宗主空缺时，由综合分最高的亲传接位 */
+  successor() {
+    let best = null, bs = -Infinity;
+    for (const d of this._groups().formal) {
+      if (d.step !== 9 || d.dead) continue;
+      const sc = this.heirScore(d);
+      if (sc > bs) { bs = sc; best = d; }
+    }
+    return best;
+  }
+
+  /* 候册排序：门槛看天赋，先后看综合分 */
+  heirScore(d) {
+    const c = HEIR.score;
+    return this.rootOf(d).mul * c.root + this.physOf(d).mul * c.phys
+      + Math.min(400, d.gongxian) * c.gongxian + d.loyalty * c.loyalty + (100 - d.demon) * c.mind;
+  }
+
+  enshrineCheck(d) {
+    if (!d) return { ok: false, why: '查无此人' };
+    if (d.type === 'servant') return { ok: false, why: '杂役不入亲传' };
+    if (d.type === 'staff') return { ok: false, why: '已转职者不在此列' };
+    if (d.step >= 9) return { ok: false, why: '已是亲传' };
+    if (d.step < 8) return { ok: false, why: `修为未到第八步（现第${d.step}步）` };
+    const r = this.rootOf(d);
+    if (r.mul < this.heirMinRoot()) return { ok: false, why: `天赋不足（${r.name}），需双灵根以上` };
+    if (d.demon >= HEIR.maxDemon) return { ok: false, why: `心魔 ${Math.round(d.demon)}，先静心` };
+    return { ok: true };
+  }
+
+  /* 候册名单：所有够格未册者，按综合分排。
+   * 名额不设上限，所以没有人是"被名额挡在外面"的，只有没排上的。 */
+  heirCandidates() {
+    const out = [];
+    for (const d of this.formal()) {
+      if (this.enshrineCheck(d).ok) out.push({ d, score: this.heirScore(d) });
+    }
+    out.sort((a, b) => b.score - a.score);
+    return out.map((x) => x.d);
+  }
+
+  enshrine(id) {
+    const d = this.byId(id);
+    const chk = this.enshrineCheck(d);
+    if (!chk.ok) return { ok: false, msg: chk.why };
+    const si = this.stepInfo(d.step);
+    d.step = 9;
+    d.enshrinedDay = this.save.day;
+    d.enshrinedBy = this.save.sect.founder;
+    d.realm = clamp(Math.max(d.realm, STEPS[8].realmFrom), 1, REALM_MAX);
+    d.prog = 0;
+    d.state = 'cultivate';
+    d.life = Math.max(d.life, baseLife(d));
+    d.loyalty = clamp(d.loyalty + 12, 0, 100);
+    if (!d.daohao) d.daohao = genDaohao();
+    this._touchDisc();
+    this.save.stats.peakStep = Math.max(this.save.stats.peakStep || 1, 9);
+    this.addRenown(40);
+    this.chronicle('enshrine', '祖师册封', `${d.name} · 亲传`,
+      `${si.title}${d.name}（${this.rootOf(d).name}）蒙祖师亲册，列第九步亲传，道号「${d.daohao}」，入弟子阁听事。`);
+    this.msg(`祖师册封：${d.name} 为亲传弟子。`, 'story');
+    return { ok: true, msg: `${d.name} 已列亲传`, disciple: d };
+  }
+
+  /* ---------- 弟子阁 · 阁老 ----------
+   * 席位随层数开。人不够就按阶梯降格任职（内门也可以坐阁老席），
+   * 连降格的人都凑不出，由祖师一指派人顶上 —— 无论如何不让阁中停摆。
+   */
+  seatCount(inst) {
+    const base = INSTITUTIONS.find((x) => x.key === inst);
+    if (inst !== 'dizige') return (base && base.seats ? base.seats.length : 0);
+    const layers = this.save.layers || 1;
+    return clamp(ELDER.base + Math.floor((layers - 1) / ELDER.perLayers), ELDER.base, ELDER.max);
+  }
+
+  seatLabel(inst, i) {
+    const base = INSTITUTIONS.find((x) => x.key === inst);
+    if (base && base.seats && base.seats[i]) return base.seats[i];
+    const cn = '甲乙丙丁戊己庚辛壬癸';
+    return `阁老·${cn[i] || i + 1}`;
+  }
+
+  _ensureSeats() {
+    const s = this.save;
+    s.posts.dizige = s.posts.dizige || [];
+    const want = this.seatCount('dizige');
+    while (s.posts.dizige.length < want) s.posts.dizige.push(null);
+    return s.posts.dizige;
+  }
+
+  /* 递补阶梯：亲传 > 核心 > 内门（降格） */
+  elderTier(d) {
+    if (!d || d.type !== 'formal') return 0;
+    if (d.step >= 9) return 1;
+    if (d.step === 8) return 2;
+    if (d.step === 7) return 3;
+    return 0;
+  }
+  elderTierEff(tier) {
+    const t = ELDER.tiers[Math.max(0, Math.min(ELDER.tiers.length - 1, tier - 1))];
+    return t ? t.eff : 0;
+  }
+
+  /* 阁中有主否：至少一名阁老在任 */
+  elderQuorum() {
+    const seats = this._ensureSeats();
+    let filled = 0;
+    for (const id of seats) { if (id && this.byId(id)) filled++; }
+    return { filled, seats: seats.length, need: ELDER.quorum, ok: filled >= ELDER.quorum };
+  }
+
+  /* 阁中办事效率：取在任阁老里最高的那一档。
+   * 0 表示阁中无主，此时不是不办事，而是把周期按 ELDER.idleMul 拉长。 */
+  elderEfficiency() {
+    const seats = this._ensureSeats();
+    let best = 0;
+    for (const id of seats) {
+      const d = id && this.byId(id);
+      if (!d) continue;
+      best = Math.max(best, this.elderTierEff(this.elderTier(d)));
+    }
+    return best;
+  }
+
+  /* 弟子阁轮值：阁老不终身占席。每 120 日换一席；
+   * 无人可换时留任 —— 换届换出个空席，是给自己找麻烦。 */
+  rotateElder() {
+    const s = this.save;
+    if (!this.modOpen('org')) return null;
+    const seats = this._ensureSeats();
+    const holder = seats.map((id, i) => ({ id, i })).filter((x) => x.id && this.byId(x.id));
+    if (!holder.length) return null;
+    const pickOne = holder[s.day % holder.length];
+    const out = this.byId(pickOne.id);
+    const taken = new Set([].concat(s.posts.dizige, s.posts.hufatang, s.posts.zhanglaohui).filter(Boolean));
+    let next = null, nextScore = -Infinity;
+    for (const d of s.disciples) {
+      if (taken.has(d.id)) continue;
+      const tier = this.elderTier(d);
+      if (!tier) continue;
+      /* 降格任职要扣分，免得内门把亲传的席挤走 */
+      const sc = this.electScore(d).total - (tier - 1) * 180;
+      if (sc > nextScore) { nextScore = sc; next = d; }
+    }
+    if (!next) return null;
+    seats[pickOne.i] = next.id;
+    if (out && out.state === 'post') out.state = 'cultivate';
+    next.state = 'post';
+    this.chronicle('elder', '弟子阁轮值', `${out ? out.name : '空席'} → ${next.name}`,
+      `弟子阁${this.seatLabel('dizige', pickOne.i)}一职轮值，${out ? `${out.name}卸任还列，` : ''}${next.name}（${ELDER.tiers[this.elderTier(next) - 1].name}）接任。`);
+    return { out, next, seat: pickOne.i };
+  }
+
+  /* 保底指派：连降格的人都凑不出时，由祖师点一下，系统挑最合适的顶上。
+   * 阁中可以寒酸，但不能没有。 */
+  forceQuorum() {
+    const seats = this._ensureSeats();
+    if (this.elderQuorum().ok) return { ok: false, msg: '阁中已有人在任' };
+    const taken = new Set(seats.filter(Boolean));
+    let best = null, bestScore = -Infinity;
+    for (const d of this.formal()) {
+      if (taken.has(d.id)) continue;
+      const sc = this.electScore(d).total;
+      if (sc > bestScore) { bestScore = sc; best = d; }
+    }
+    if (!best && this.servants().length) best = this.servants()[0];
+    if (!best) return { ok: false, msg: '山中无人可用' };
+    let idx = seats.findIndex((x) => !x);
+    if (idx < 0) idx = 0;
+    seats[idx] = best.id;
+    best.state = 'post';
+    this.chronicle('force', '祖师指派', `${best.name} · ${this.seatLabel('dizige', idx)}`,
+      `阁中久无人主事，祖师亲指${best.name}入阁，权理日常。`);
+    this.msg(`祖师指派：${best.name} 入阁主事。`, 'story');
+    return { ok: true, msg: `${best.name} 入阁主事` };
+  }
+
+
   /* 杂役升星 */
   _servantStar(d) {
     if (d.star >= 9) return;
@@ -700,8 +1360,9 @@ export class Game {
     };
   }
 
+  /* 席位资格：弟子阁按阶梯收人 —— 亲传、核心先来，凑不满才轮到内门降格任职 */
   eligible(inst, d) {
-    if (inst === 'dizige') return d.type === 'formal' && d.step === 9;
+    if (inst === 'dizige') return this.elderTier(d) > 0;
     const step = d.type === 'staff' ? d.prevStep : d.step;
     return step >= 6 && d.type !== 'servant';
   }
@@ -720,9 +1381,11 @@ export class Game {
     for (const key of Object.keys(this.save.posts)) {
       this.save.posts[key] = this.save.posts[key].map((x) => (x === id ? null : x));
     }
-    this.save.posts[inst][idx] = id;
+    /* 席位可能随层数增加过，落座前先补齐数组 */
+    const seats = inst === 'dizige' ? this._ensureSeats() : this.save.posts[inst];
+    seats[idx] = id;
     d.state = 'post';
-    this.msg(`${d.name} 出任${INSTITUTIONS.find((i) => i.key === inst).name}·${INSTITUTIONS.find((i) => i.key === inst).seats[idx]}。`, 'good');
+    this.msg(`${d.name} 出任${INSTITUTIONS.find((i) => i.key === inst).name}·${this.seatLabel(inst, idx)}。`, 'good');
     return { ok: true, msg: '任命完成' };
   }
 
@@ -758,6 +1421,7 @@ export class Game {
     const d = this.byId(id);
     if (!d) return { ok: false, msg: '弟子不存在' };
     this.save.disciples = this.save.disciples.filter((x) => x.id !== id);
+    this._touchDisc();
     for (const k of Object.keys(this.save.posts)) this.save.posts[k] = this.save.posts[k].map((x) => (x === id ? null : x));
     this.save.battle.atk = this.save.battle.atk.filter((x) => x !== id);
     this.save.battle.def = this.save.battle.def.filter((x) => x !== id);
@@ -852,6 +1516,7 @@ export class Game {
   clearFailedBatch() {
     const list = this.formal().filter((d) => d.step === 3 && d.tries3 >= 3);
     for (const d of list) this.save.disciples = this.save.disciples.filter((x) => x.id !== d.id);
+    this._touchDisc();
   }
   convertFailedBatch() {
     const list = this.formal().filter((d) => d.step === 3 && d.tries3 >= 3);
@@ -864,7 +1529,7 @@ export class Game {
     const target = this.formal().filter((d) => d.step >= 6).sort((a, b) => a.loyalty - b.loyalty)[0];
     if (!target) return;
     if (mode === 'arrest') { target.loyalty = 5; target.demon = clamp(target.demon + 20, 0, 100); }
-    if (mode === 'exile') { this.save.disciples = this.save.disciples.filter((x) => x.id !== target.id); }
+    if (mode === 'exile') { this.save.disciples = this.save.disciples.filter((x) => x.id !== target.id); this._touchDisc(); }
     if (mode === 'interrogate') { target.loyalty = clamp(target.loyalty + 20, 0, 100); }
   }
   promoteToHeir(mode) {
@@ -1039,7 +1704,7 @@ export function migrate(raw) {
   /* V1.4 增量：旧档不迁移字段，读取时按缺省值补齐 */
   save.policy = save.policy || {};
   save.policy.stance = ['lenient', 'balanced', 'strict'].includes(save.policy.stance) ? save.policy.stance : 'balanced';
-  save.policy.areas = Object.assign({ seat: true, recruit: true, heal: true, prod: true }, save.policy.areas || {});
+  save.policy.areas = Object.assign(Object.fromEntries(AREAS.map((a) => [a.key, true])), save.policy.areas || {});
   save.policy.recruit = Object.assign({ minRoot: 'fan' }, save.policy.recruit || {});
   save.policy.laws = Object.assign({ morning: true, curfew: false, bounty: false }, save.policy.laws || {});
   save.matterState = Object.assign({ snooze: {}, seen: {}, seenDay: 0 }, save.matterState || {});

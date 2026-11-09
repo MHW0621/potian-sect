@@ -268,8 +268,89 @@ export const NAMED_BACKGROUNDS = [
 ];
 
 /* ---------- 招收 ---------- */
-/* 招收成本与结果，前后端共用一份，避免各处各写一套 */
+/* 门派不设人数上限：人来人往靠粮秣与资源自然调节，不靠一道名额门槛。 */
+/* 每两年（720 日）山门大开一次，按资质分流；祖师亦可随时亲自开山收徒。 */
 export const RECRUIT = {
   servant: { name: '杂役', cost: { liangshi: 60 }, desc: '做粗活、跑腿、守山门；不占修炼位，也不出战' },
   formal: { name: '正式弟子', cost: { lingshi: 260, liangshi: 80 }, desc: '查验根骨后入门，可修炼、可出战、可转职' },
+  /* 批量开山：入门费默认不收（政策里可开），只靠每日口粮形成供养压力。
+     为什么默认不收：一百人一批，若按人收入门费，两批就能把粮仓抽干，
+     扩张反而被自己的收费卡死。供养压力放在每日口粮上更自然。 */
+  batch: {
+    interval: 720,        // 每两年一次
+    min: 100,
+    max: 200,             // 硬边界，声望只影响落在区间里的位置
+    /* 主判据：根骨 mul ≥ 此值入正式，其余入杂役（三灵根 1.0 及以上） */
+    formalRootMul: 1.0,
+    /* 两端夹逼：同批总会出现"一个达标的都没有"或"过半达标"的极端，
+       夹在区间内保证每一批都有正式也有杂役，读起来才像开山收徒。
+       上界放到 0.55：三灵根以上约占四成半，夹得太紧就变成比例说了算、资质说了不算了。 */
+    formalMin: 0.22,
+    formalMax: 0.55,
+    /* 入门费（默认不启用，由政策 settings.recruitFee 打开） */
+    fee: { liangshi: 2.4 },
+    formalFee: { lingshi: 6 },
+    /* 声望加权：声望到 2400 时来人的下界抬到区间中段，上界不动 */
+    renownFull: 2400,
+  },
+  /* 祖师亲收：不受两年之限，随叫随收 */
+  manual: {
+    max: 200,             // 单次上限，防止一次收入上万
+    costPerHead: { liangshi: 3 },
+    formalCostPerHead: { lingshi: 8 },
+  },
 };
+
+/* ---------- 亲传（第九步） ----------
+ * 名额不设上限：够格就册，册不册由祖师定。
+ * 养不养得起是经济问题（俸禄），不是名额问题。
+ */
+export const HEIR = {
+  minRoot: 1.3,          // 双灵根起。天赋是门票，不是保证
+  maxDemon: 70,          // 心魔失控者先静心
+  stipend: { lingshi: 96 },   // 每位亲传每年俸禄，政策里可关
+  bonus: { gain: 0.01, renown: 3 }, // 每位在册亲传给全宗的修炼/声望加成
+  /* 候册排序权重：门槛看天赋，先后看综合分 */
+  score: { root: 40, phys: 12, gongxian: 1.2, loyalty: 0.2, mind: 0.3 },
+};
+
+/* ---------- 弟子阁 ----------
+ * 阁老席位随山门层数开；人不够时按阶梯降格任职，绝不空转。
+ */
+export const ELDER = {
+  base: 3,
+  perLayers: 2,          // 每开 2 层加 1 席
+  max: 12,
+  rotateDays: 120,       // 轮值周期
+  tiers: [               // 递补阶梯：第 1 档起，效力递减
+    { step: 9, name: '亲传', eff: 1 },
+    { step: 8, name: '核心', eff: 1 },
+    { step: 7, name: '内门（降格）', eff: 0.8 },
+  ],
+  quorum: 1,             // 法定人数：至少一名阁老在任才叫"阁中有主"
+  idleMul: 3,            // 无阁老时办事周期拉长倍数（变慢，但不停办）
+};
+
+/* ---------- 破天阁自决范围 ----------
+ * 祖师只留五件：亲传册封、开山收徒、政策、重大异动、处决流放。
+ * 其余全部交阁中按策自办，只在待处理里报备一行。
+ * log 是宗门史里的题头，报备从这里归拢，不另存副本。
+ */
+export const AREAS = [
+  { key: 'seat', name: '补缺', log: '破天阁·补缺', desc: '席位空缺时由阁议推举' },
+  { key: 'recruit', name: '招揽', log: '破天阁·招揽', desc: '杂役不足时自行招收' },
+  { key: 'heal', name: '疗养', log: '破天阁·疗养', desc: '伤者康复后归队' },
+  { key: 'assign', name: '分派', log: '破天阁·分派', desc: '闲置弟子按例接任务' },
+  { key: 'build', name: '营建', log: '破天阁·营建', desc: '库房有余时排期营建' },
+  { key: 'turn', name: '转职', log: '破天阁·转职', desc: '晋升无望的老弟子转任执事' },
+  { key: 'punish', name: '刑赏', log: '破天阁·刑赏', desc: '门规小过由阁中处置' },
+  { key: 'prod', name: '排产', log: '破天阁·排产', desc: '灵田与工坊按例开工' },
+];
+export const AREA_BY_KEY = Object.fromEntries(AREAS.map((a) => [a.key, a]));
+
+/* ---------- 道号 ---------- */
+export const DAOHAO_HEAD = ['玄', '清', '虚', '云', '无', '太', '守', '明', '静', '长'];
+export const DAOHAO_BODY = ['真', '微', '一', '元', '素', '和', '寂', '照', '朴', '冲'];
+export const DAOHAO_TAIL = ['子', '道人', '真人', '上人', '散人'];
+/* 道号是内门以上的体面，第七步起才赐 */
+export const DAOHAO_MIN_STEP = 7;

@@ -3,7 +3,7 @@
  */
 import {
   RESOURCES, RES_BY_KEY, FACILITIES, INSTITUTIONS, LAYERS, REGIONS,
-  MISSION_TEMPLATES, TECHNIQUES, ENDINGS, RECRUIT,
+  MISSION_TEMPLATES, TECHNIQUES, ENDINGS, RECRUIT, HEIR, ELDER, DAOHAO_MIN_STEP, AREAS, AREA_BY_KEY,
 } from './config.js';
 import { STORY_BY_ID, STORY_NODES } from './story.js';
 import { Scene, BUILDINGS } from './scene.js';
@@ -55,7 +55,9 @@ export const UI = {
   msgs: [],
   mods: {},
   scene: null,
-  discFilter: { type: 'all', sort: 'power', q: '' },
+  discFilter: { type: 'all', sort: 'power', q: '', show: 30 },
+  /* 报备默认只露最近五件，其余折叠 */
+  autoFold: false,
   msgFilter: 'all',
   templeTab: 'memo',
   gfx: gfxPref(),
@@ -95,10 +97,31 @@ export const UI = {
       });
     });
     document.getElementById('panelBody').addEventListener('click', (e) => this.onClick(e));
-    /* 交互窗口：按下后 1.5 秒内不做自动重排 */
-    const hold = () => { this._interactUntil = Date.now() + 1500; };
-    document.getElementById('panelBody').addEventListener('pointerdown', hold, true);
-    document.getElementById('panelBody').addEventListener('keydown', hold, true);
+    /* 搜索与翻页这类输入不该等点击：输入即筛，且不重建整个抽屉 */
+    document.getElementById('panelBody').addEventListener('input', (e) => {
+      const el = e.target;
+      if (!el || el.id !== 'discSearch') return;
+      this.discFilter.q = el.value;
+      this.discFilter.show = 30;
+      this._interactUntil = Date.now() + 800;
+      /* 只换列表区，不碰输入框，否则光标会跳 */
+      this.renderDiscList();
+    });
+    /* 交互窗口：按下后 1.5 秒内不做自动重排。
+       同时给按下态反馈 —— 点了没动静最伤手感，先给个回应再等结算。 */
+    const hold = (e) => {
+      this._interactUntil = Date.now() + 1500;
+      const btn = e && e.target && e.target.closest ? e.target.closest('[data-act]') : null;
+      if (btn) {
+        btn.classList.add('is-busy');
+        setTimeout(() => btn.classList.remove('is-busy'), 220);
+      }
+    };
+    const pbody = document.getElementById('panelBody');
+    pbody.addEventListener('pointerdown', hold, true);
+    pbody.addEventListener('keydown', hold, true);
+    /* 触底追加：弟子过百也不必翻页 */
+    pbody.addEventListener('scroll', () => this.onPanelScroll(), { passive: true });
     document.getElementById('templeStage').addEventListener('pointerdown', hold, true);
     document.getElementById('templeStage').addEventListener('click', (e) => this.onClick(e));
     document.addEventListener('keydown', (e) => {
@@ -292,9 +315,11 @@ export const UI = {
   },
 
   syncBadges(list) {
-    const unread = unreadCount(this.game, list);
-    const decide = list.filter((m) => m.level === 3).length;
-    const topLevel = list.length ? Math.max(...list.map((m) => m.level)) : 0;
+    /* 报备项不上红点：阁中已经办完的事，不该在祖师脸上闪 */
+    const real = list.filter((m) => !m.auto);
+    const unread = unreadCount(this.game, real);
+    const decide = real.filter((m) => m.level === 3).length;
+    const topLevel = real.length ? Math.max(...real.map((m) => m.level)) : 0;
     const setDot = (el, n, lv) => {
       if (!el) return;
       el.hidden = n <= 0;
@@ -304,7 +329,7 @@ export const UI = {
     setDot(document.getElementById('msgDot'), this.unreadNews(), 1);
 
     const pb = document.getElementById('pendingBadge');
-    if (pb) { pb.hidden = list.length === 0; pb.textContent = list.length; pb.className = 'rail-badge' + (topLevel === 2 ? ' lv2' : topLevel === 1 ? ' lv1' : ''); }
+    if (pb) { pb.hidden = real.length === 0; pb.textContent = real.length; pb.className = 'rail-badge' + (topLevel === 2 ? ' lv2' : topLevel === 1 ? ' lv1' : ''); }
     const tb = document.getElementById('templeBadge');
     if (tb) { tb.hidden = decide === 0; tb.textContent = decide; tb.className = 'rail-badge'; }
     const mb = document.getElementById('msgBadge');
@@ -359,6 +384,27 @@ export const UI = {
     const top = body.scrollTop;
     body.innerHTML = html;
     if (top) body.scrollTop = top;
+  },
+
+  /* 当前面板内容的"同一性"指纹：只有它变了才值得重排。
+   * 把指纹放在界面层，主循环与测试才能共用同一套判断。 */
+  panelSignature() {
+    const g = this.game;
+    if (!g) return '';
+    const s = g.save;
+    const mr = this._matters || [];
+    let refs = '';
+    for (const m of mr) refs += m.ref + (m.auto ? '' : '*') + ',';
+    return [
+      this.panel,
+      Math.floor((s.day || 0) / 20),
+      s.disciples.length,
+      /* 资源只在对账页进指纹：别处不显示，逐点跳动的数字只会白刷 DOM */
+      this.panel === 'workshop' ? Math.round((s.res.lingshi || 0) / 50) + '.' + Math.round((s.res.liangshi || 0) / 50) : '',
+      (s.posts.dizige || []).join('.'),
+      (s.missions || []).length,
+      refs,
+    ].join('|');
   },
 
   isLive() {
@@ -462,15 +508,22 @@ export const UI = {
         <div class="card"><div class="card-head"><div class="t"><h3>自决记录</h3><small>破天阁</small></div></div>${this.autoLog(4)}</div>
       </div>`;
     }
-    const groups = [3, 2, 1].map((lv) => ({ lv, items: list.filter((m) => m.level === lv) })).filter((x) => x.items.length);
+    /* 分两栏：要祖师拍板的，和阁中已办只作报备的。
+       以前两者混在一张单子上，一堆"某弟子修为已满"把真正的大事淹掉了。 */
+    const decide = list.filter((m) => !m.auto);
+    const auto = list.filter((m) => m.auto);
+    const groups = [3, 2, 1]
+      .map((lv) => ({ lv, items: decide.filter((m) => m.level === lv) }))
+      .filter((x) => x.items.length);
+
     return `<div class="stack">
       <div class="card tight">
         <div class="spread">
-          <div><b style="font-family:var(--f-head)">共 ${list.length} 件</b>
-            <span class="sub">　待决 ${list.filter((m) => m.level === 3).length} · 重要 ${list.filter((m) => m.level === 2).length} · 日常 ${list.filter((m) => m.level === 1).length}</span></div>
+          <div><b style="font-family:var(--f-head)">待祖师裁决 ${decide.length} 件</b>
+            <span class="sub">　阁中报备 ${auto.length} 件</span></div>
           <button class="btn sm ghost" data-act="pending:read">全部已读</button>
         </div>
-        <p class="hint" style="margin-top:6px">待决事项须去祖师殿批复；日常事务破天阁会自行处置，此处只作备查。</p>
+        <p class="hint" style="margin-top:6px">席位补缺、弟子突破、选拔排期、疗伤归队都已交破天阁自办，只在下方报备一行；要您过目的只剩这些。</p>
       </div>
       ${groups.map((grp) => `
         <div class="stack" style="gap:8px">
@@ -488,6 +541,23 @@ export const UI = {
               </div>
             </div>`).join('')}
         </div>`).join('')}
+
+      ${auto.length ? `<div class="stack" style="gap:8px">
+        <div class="spread" style="padding:0 2px"><span class="sub">阁中已办 · 报备</span><span class="sub">${auto.length} 件</span></div>
+        ${auto.slice(0, this.autoFold ? auto.length : 5).map((m) => `
+          <div class="matter lv1 is-auto">
+            <div class="m-main">
+              <div class="m-title">${esc(m.title)}</div>
+              <div class="m-desc">${esc(m.desc || '')}</div>
+            </div>
+            <span class="m-lv">报备</span>
+            <div class="m-act">
+              <button class="btn sm ghost" data-act="matter:go" data-arg="${esc(m.ref)}">查看</button>
+              ${m.area ? `<button class="btn sm ghost" data-act="auto:review" data-arg="${esc(m.area)}">追责</button>` : ''}
+            </div>
+          </div>`).join('')}
+        ${auto.length > 5 ? `<button class="btn sm ghost block" data-act="auto:fold">${this.autoFold ? '收起，只看最近五件' : `展开其余 ${auto.length - 5} 件`}</button>` : ''}
+      </div>` : ''}
       <p class="hint center">暂缓的事项四十五日内不再提示。</p>
     </div>`;
   },
@@ -554,12 +624,12 @@ export const UI = {
 
       <div class="card">
         <div class="card-head"><div class="t"><h3>自决范围</h3><small>关闭后此类事务回到待处理</small></div></div>
-        ${[['seat', '补缺', '席位空缺时由阁议推举'], ['recruit', '招揽', '杂役不足时自行招收'], ['heal', '疗养', '伤者康复后归队'], ['prod', '排产', '灵田与工坊按例开工']]
-        .map(([k, n, d]) => `
+        ${AREAS.map((a) => `
           <div class="toggle-row">
-            <div><div class="l-name">${n}</div><div class="l-desc">${d}</div></div>
-            <button class="switch ${areas[k] !== false ? 'on' : ''}" data-act="pol:area" data-arg="${k}" aria-label="${n}"></button>
+            <div><div class="l-name">${a.name}</div><div class="l-desc">${a.desc}</div></div>
+            <button class="switch ${areas[a.key] !== false ? 'on' : ''}" data-act="pol:area" data-arg="${a.key}" aria-label="${a.name}"></button>
           </div>`).join('')}
+        <p class="hint">关掉哪一类，那一类就回到待处理，由祖师逐件过目。</p>
       </div>
 
       <div class="card">
@@ -732,85 +802,181 @@ export const UI = {
     const g = this.game;
     const s = g.save;
     const f = this.discFilter;
+    const total = s.disciples.length;
+    const formalN = g.formal().length;
+    const servantN = g.servants().length;
+    const staffN = g.staff().length;
+    const bnCount = g.formal().reduce((n, d) => n + (d.state === 'bottleneck' ? 1 : 0), 0);
+
+    /* 亲传候册：够格未册封的人只在这里出现，不混进日常列表。
+       名额不设上限，所以没有"满了"这一说，只有"还没册"。 */
+    const ready = g.heirCandidates();
+    const heirNow = g.heirCount();
+    const heirCard = `<div class="card heir-card">
+      <div class="card-head">
+        <div class="t"><h3>亲传候册</h3><small>第八步以上 · 双灵根起 · 唯祖师可册</small></div>
+        <span class="pill gold">${heirNow} 已在册 · ${ready.length} 人候册</span>
+      </div>
+      ${ready.length ? `<div class="heir-list">
+        ${ready.slice(0, 10).map((d) => `<div class="heir-row">
+          <span class="hn">${esc(d.name)}</span>
+          <span class="hi">${esc(g.rootOf(d).name)} · ${esc(g.realmInfo(d).name)} · 综合 ${Math.round(g.heirScore(d))} · 功勋 ${Math.round(d.gongxian)}</span>
+          <button class="btn sm gold" data-act="disc:heir" data-arg="${d.id}">册封</button>
+        </div>`).join('')}
+      </div>
+      <p class="hint">名额不设上限：够格就能册，册不册在祖师。天赋只是门票，综合分只定先后。${ready.length > 10 ? `另有 ${ready.length - 10} 人候册，此处只列综合分前十。` : ''}</p>`
+        : '<p class="hint">尚无人够格。亲传要三条：修为已至第八步、灵根在双灵根以上、心魔未失控。第九步不靠晋升而来，只能祖师亲册。</p>'}
+    </div>`;
+
+    return `<div class="stack">
+      <div class="card recruit-card">
+        <div class="card-head">
+          <div class="t"><h3>招收入门</h3><small>在册 ${fmt(total)} 人 · 正式 ${fmt(formalN)} · 杂役 ${fmt(servantN)}${staffN ? ` · 转职 ${staffN}` : ''}</small></div>
+          ${bnCount ? `<button class="btn sm ghost" data-act="exam">第三步选拔 · 待考 ${bnCount}</button>` : ''}
+        </div>
+        <div class="rec-inputs">
+          <label><span>人数</span><input id="recruitCount" type="number" min="1" max="200" value="1" inputmode="numeric"></label>
+          <label><span>赐姓</span><input id="recruitSurname" type="text" maxlength="2" placeholder="不改"></label>
+          <label><span>字辈</span><input id="recruitGen" type="text" maxlength="1" placeholder="随取"></label>
+        </div>
+        <div class="rec-grid">
+          <div class="rec">
+            <div class="rec-top"><b>收正式弟子</b><span class="rec-cost">灵石 ${RECRUIT.formal.cost.lingshi} · 粮 ${RECRUIT.formal.cost.liangshi}</span></div>
+            <p class="rec-desc">可修炼、可出战、可转职。天赋靠查验，不收废人。</p>
+            <button class="btn sm primary" data-act="recruit" data-arg="formal">按上方数量收</button>
+          </div>
+          <div class="rec">
+            <div class="rec-top"><b>收杂役</b><span class="rec-cost">粮 ${RECRUIT.servant.cost.liangshi}</span></div>
+            <p class="rec-desc">跑腿、守门、下田。不占修炼位，也不出战。</p>
+            <button class="btn sm" data-act="recruit" data-arg="servant">按上方数量收</button>
+          </div>
+        </div>
+        <div class="rec-wide">
+          <div class="rw-top"><b>亲自开山</b><span>按资质分流 · 一批一百至两百人</span></div>
+          <p class="rec-desc">招一大批：先验根骨，达标者入正式，其余入杂役。不够一百人凑不成一批。</p>
+          <div class="row" style="flex-wrap:wrap">
+            <label class="rec-num"><span>人数</span><input id="recruitBatchCount" type="number" min="100" max="200" value="120" inputmode="numeric"></label>
+            <button class="btn sm gold" data-act="recruit" data-arg="batch">开山收徒</button>
+          </div>
+        </div>
+      </div>
+
+      ${heirCard}
+
+      <div class="card tight">
+        <div class="row" style="flex-wrap:wrap">
+          ${[['all', `全部 ${fmt(total)}`], ['formal', `正式 ${formalN}`], ['servant', `杂役 ${servantN}`], ['staff', `转职 ${staffN}`], ['break', `待突破 ${bnCount}`]]
+        .map(([k, n]) => `<button class="btn sm ${f.type === k ? 'primary' : ''}" data-act="filter" data-arg="type:${k}">${n}</button>`).join('')}
+        </div>
+        <div class="row" style="flex-wrap:wrap;margin-top:8px">
+          ${[['power', '战力'], ['step', '步数'], ['life', '寿元'], ['demon', '心魔'], ['join', '入门']]
+        .map(([k, n]) => `<button class="btn sm ${f.sort === k ? 'ghost' : ''}" data-act="filter" data-arg="sort:${k}">${n}</button>`).join('')}
+          <input class="disc-search" id="discSearch" type="search" placeholder="搜索姓名" value="${esc(f.q || '')}">
+        </div>
+      </div>
+
+      ${this.discListHtml()}
+    </div>`;
+  },
+
+  /* 列表单独成块：搜索、加载更多只换这一块，不重建整个抽屉。
+   * 一千人不可能一次画完；也不用等高卡片硬套虚拟滚动 ——
+   * 弟子卡的按钮会换行，行高不一致，虚拟滚动必然错位。
+   * 这里用滚动追加：首屏三十张，滚到底再追加三十张，只 append，不重排。 */
+  discListHtml() {
+    const g = this.game;
+    const STEP = 30;
+    const f = this.discFilter;
     const sorters = {
       power: (a, b) => g.power(b) - g.power(a),
-      step: (a, b) => (b.step || 0) - (a.step || 0) || b.star - a.star,
+      step: (a, b) => (b.step || 0) - (a.step || 0) || (b.star || 0) - (a.star || 0),
       life: (a, b) => (b.life - b.age) - (a.life - a.age),
       join: (a, b) => b.joinedDay - a.joinedDay,
       demon: (a, b) => b.demon - a.demon,
     };
     const cmp = sorters[f.sort] || sorters.power;
-    const cap = g.cap();
-    const total = s.disciples.length;
-    const formal = s.disciples.filter((d) => d.type === 'formal').sort(cmp);
-    const servant = s.disciples.filter((d) => d.type === 'servant').sort(cmp);
-    const staff = s.disciples.filter((d) => d.type === 'staff').sort(cmp);
-    const broken = s.disciples.filter((d) => d.state === 'bottleneck');
+    const q = (f.q || '').trim();
+    /* 先筛再排：一千人时也只排一次、只画一屏。
+       slice() 必须有 —— g.formal() 给的是缓存数组，原地 sort 会把它打乱。 */
+    const shape = (list) => (q ? list.filter((d) => d.name.includes(q)) : list.slice()).sort(cmp);
 
-    const afford = (cost) => Object.entries(cost).every(([k, v]) => (s.res[k] || 0) >= v);
-    const costTxt = (cost) => Object.entries(cost).map(([k, v]) => `${(RES_BY_KEY[k] || {}).name || k} ${v}`).join(' · ');
-
-    const recBtn = (key) => {
-      const r = RECRUIT[key];
-      const full = total >= cap;
-      const poor = !afford(r.cost);
-      const off = full || poor;
-      const why = full ? `已满 ${cap} 人，先开辟更高层` : poor ? `缺 ${costTxt(r.cost)}` : '';
-      return `<div class="rec">
-        <div class="rec-top"><b>${r.name}</b><span class="rec-cost">${costTxt(r.cost)}</span></div>
-        <p class="rec-desc">${r.desc}</p>
-        <button class="btn sm ${key === 'formal' ? 'primary' : ''}" data-act="recruit" data-arg="${key}" ${off ? 'disabled' : ''}>
-          ${off ? why : `招一名${r.name}`}
-        </button>
-      </div>`;
+    const rows = [];
+    const section = (key, title, note, list) => {
+      if (!list.length) return;
+      rows.push({ sec: { key, title, note, n: list.length } });
+      for (const d of list) rows.push({ d });
     };
+    const flat = (list) => { for (const d of list) rows.push({ d }); };
 
-    const group = (title, list, note) => {
-      if (!list.length) return '';
-      return `<div class="disc-group">
-        <div class="dg-head"><b>${title}</b><span>${list.length} 人</span><em>${note}</em></div>
-        <div class="dg-body">${list.slice(0, 60).map((d) => this.discCard(d)).join('')}</div>
-      </div>`;
-    };
-
-    const filtered = (list) => (list.length
-      ? `<div class="stack">${list.slice(0, 60).map((d) => this.discCard(d)).join('')}</div>`
-      : '<div class="card empty"><strong>此处无人</strong>换个筛选项看看。</div>');
-
-    let body;
     if (f.type === 'all') {
-      body = group('正式弟子', formal, '修炼、出战、转职')
-        + group('杂役', servant, '跑腿、守门，占口粮')
-        + group('已转职', staff, '在机构当值')
-        || '<div class="card empty"><strong>还没有人</strong>先在山门收第一批。</div>';
-    } else if (f.type === 'break') body = filtered(broken);
-    else if (f.type === 'formal') body = filtered(formal);
-    else if (f.type === 'servant') body = filtered(servant);
-    else body = filtered(staff);
+      section('formal', '正式弟子', '修炼 · 出战 · 转职', shape(g.formal()));
+      section('servant', '杂役', '跑腿 · 守门 · 占口粮', shape(g.servants()));
+      section('staff', '已转职', '在机构当值', shape(g.staff()));
+    } else if (f.type === 'formal') flat(shape(g.formal()));
+    else if (f.type === 'servant') flat(shape(g.servants()));
+    else if (f.type === 'staff') flat(shape(g.staff()));
+    else flat(shape(g.formal().filter((d) => d.state === 'bottleneck')));
 
-    const examPool = formal.filter((d) => d.step === 3 && d.state === 'bottleneck' && d.tries3 < 3);
-    return `<div class="stack">
-      <div class="card recruit-card">
-        <div class="card-head">
-          <div class="t"><h3>招收入门</h3><small>在册 ${total} / ${cap} 人</small></div>
-          ${examPool.length ? `<button class="btn sm ghost" data-act="exam">第三步选拔 · ${examPool.length} 人</button>` : ''}
-        </div>
-        <div class="rec-grid">${recBtn('formal')}${recBtn('servant')}</div>
-        <div class="cap-bar"><i style="width:${Math.min(100, (total / cap) * 100)}%"></i></div>
-      </div>
+    /* 缓存整份行数据，追加时接着切片用，不必重算排序 */
+    this._discRows = rows;
+    const show = Math.min(rows.length, Math.max(STEP, f.show || STEP));
+    if (f.show !== show) f.show = show;
 
-      <div class="card tight">
-        <div class="row" style="flex-wrap:wrap">
-          ${[['all', '全部'], ['formal', '正式'], ['servant', '杂役'], ['staff', '已转职'], ['break', '待突破']]
-        .map(([k, n]) => `<button class="btn sm ${f.type === k ? 'primary' : ''}" data-act="filter" data-arg="type:${k}">${n}${k === 'break' && broken.length ? ` ${broken.length}` : ''}</button>`).join('')}
-        </div>
-        <div class="row" style="flex-wrap:wrap;margin-top:8px">
-          ${[['power', '战力'], ['step', '步数'], ['life', '寿元'], ['demon', '心魔'], ['join', '入门']]
-        .map(([k, n]) => `<button class="btn sm ${f.sort === k ? 'ghost' : ''}" data-act="filter" data-arg="sort:${k}">${n}</button>`).join('')}
-        </div>
-      </div>
-      ${body}
+    const slice = rows.slice(0, show);
+    const listHtml = slice.length
+      ? slice.map((r) => (r.sec ? this.sectionHead(r.sec) : this.discCard(r.d))).join('')
+      : `<div class="card empty"><strong>${q ? '没有匹配的人' : '此处无人'}</strong>${q ? '换个字试试' : '去山门收第一批'}</div>`;
+
+    return `<div id="discListWrap">
+      <div class="disc-group">${listHtml}</div>
+      ${rows.length > show ? `<div class="more-bar"><span>已显示 ${show} / ${rows.length}</span><button class="btn sm ghost" data-act="disc:more">继续加载</button></div>` : ''}
     </div>`;
+  },
+
+  sectionHead(sec) {
+    return `<div class="dg-head"><b>${esc(sec.title)}</b><span>${sec.n} 人</span><em>${esc(sec.note)}</em></div>`;
+  },
+
+  /* 滚到底再追加一屏：只 append，不动已有卡片，滚动位置不跳 */
+  loadMoreDisc() {
+    const rows = this._discRows;
+    const f = this.discFilter;
+    if (!rows || !rows.length) return;
+    const STEP = 30;
+    const show = f.show || STEP;
+    if (show >= rows.length) return;
+    const next = Math.min(rows.length, show + STEP);
+    const wrap = document.querySelector('#discListWrap .disc-group');
+    if (!wrap) return this.renderDiscList();
+    wrap.insertAdjacentHTML('beforeend', rows.slice(show, next)
+      .map((r) => (r.sec ? this.sectionHead(r.sec) : this.discCard(r.d))).join(''));
+    f.show = next;
+    const bar = document.querySelector('#discListWrap .more-bar');
+    if (!bar) return;
+    if (next >= rows.length) bar.remove();
+    else { const sp = bar.querySelector('span'); if (sp) sp.textContent = `已显示 ${next} / ${rows.length}`; }
+  },
+
+  /* 只换列表块：搜索时输入框焦点与光标保持不动 */
+  renderDiscList() {
+    const box = document.getElementById('discListWrap');
+    if (!box) return this.renderPanel(true);
+    const body = document.getElementById('panelBody');
+    const top = body ? body.scrollTop : 0;
+    const tpl = document.createElement('div');
+    tpl.innerHTML = this.discListHtml();
+    const next = tpl.firstElementChild;
+    if (next) box.replaceWith(next);
+    if (body) body.scrollTop = top;
+  },
+
+  /* 触底加载：离底 240px 就预取，手感上感觉不到"翻页" */
+  onPanelScroll() {
+    if (this.panel !== 'disciples') return;
+    const body = document.getElementById('panelBody');
+    if (!body) return;
+    if (body.scrollTop + body.clientHeight < body.scrollHeight - 240) return;
+    this.loadMoreDisc();
   },
 
   discCard(d) {
@@ -846,10 +1012,11 @@ export const UI = {
       </div>
       <div class="row" style="flex-wrap:wrap">
         <button class="btn sm" data-act="disc:detail" data-arg="${d.id}">详情</button>
+        <button class="btn sm ghost" data-act="disc:rename" data-arg="${d.id}">赐名</button>
         ${d.type === 'formal' && d.state === 'bottleneck' && d.step < 9 && d.step !== 3 ? `<button class="btn sm primary" data-act="disc:break" data-arg="${d.id}">突破</button>` : ''}
         ${d.type === 'formal' && d.step >= 4 ? `<button class="btn sm ghost" data-act="disc:convert" data-arg="${d.id}">转职</button>` : ''}
         ${d.type === 'staff' ? `<button class="btn sm ghost" data-act="disc:back" data-arg="${d.id}">复归弟子</button>` : ''}
-        ${d.type === 'formal' && d.step === 8 ? `<button class="btn sm gold" data-act="disc:heir" data-arg="${d.id}">指定亲传</button>` : ''}
+        ${d.type === 'formal' && d.step === 8 && g.enshrineCheck(d).ok ? `<button class="btn sm gold" data-act="disc:heir" data-arg="${d.id}">册封亲传</button>` : ''}
       </div>
     </div>`;
   },
@@ -857,18 +1024,21 @@ export const UI = {
   /* ---------- 机构 ---------- */
   pOrg() {
     const g = this.game; const s = g.save;
+    const q = g.elderQuorum();
     const blocks = INSTITUTIONS.map((inst) => {
-      const seats = s.posts[inst.key];
+      const seats = inst.key === 'dizige' ? g._ensureSeats() : s.posts[inst.key];
       return `
       <div class="card">
-        <div class="card-head"><div class="t"><h3>${inst.name}</h3><small>${inst.key === 'dizige' ? '亲传保留弟子身份' : '任职即脱离弟子身份'}</small></div></div>
+        <div class="card-head"><div class="t"><h3>${inst.name}</h3><small>${inst.key === 'dizige' ? `${seats.length} 席 · 随层数开 · 亲传保留弟子身份` : '任职即脱离弟子身份'}</small></div></div>
         <div class="seat-grid">
           ${seats.map((id, i) => {
         const d = id ? g.byId(id) : null;
+        const tier = d && inst.key === 'dizige' ? g.elderTier(d) : 0;
+        const tierName = tier ? ELDER.tiers[tier - 1].name : '';
         return `<div class="seat ${d ? '' : 'vacant'}">
-              <div class="sl">${inst.seats[i]}</div>
+              <div class="sl">${g.seatLabel(inst.key, i)}</div>
               <div class="sn">${d ? esc(d.name) : '空缺'}</div>
-              ${d ? `<div class="sub">第${d.type === 'staff' ? d.prevStep : d.step}步 · 战力 ${fmt(g.power(d))}</div>
+              ${d ? `<div class="sub">第${d.type === 'staff' ? d.prevStep : d.step}步 · 战力 ${fmt(g.power(d))}${tierName ? ` · ${tierName}` : ''}</div>
               <button class="btn sm ghost" style="margin-top:6px" data-act="seat:vacate" data-arg="${inst.key}:${i}">卸任</button>`
             : `<button class="btn sm" data-act="seat:elect" data-arg="${inst.key}:${i}">竞选</button>
               <button class="btn sm ghost" style="margin-top:4px" data-act="seat:assign" data-arg="${inst.key}:${i}">手动提名</button>`}
@@ -878,13 +1048,25 @@ export const UI = {
       </div>`;
     }).join('');
 
+    const heirs = g.formal().filter((d) => d.step === 9);
     return `<div class="stack">
-      <div class="card tight"><p class="hint">第${g.maxStep() || 0}步为当前最高。护法堂与长老会席位需已转职的第六步以上者；弟子阁席位需亲传弟子。空缺由破天阁按策略自行补选，也可在此亲择。</p></div>
+      <div class="card tight"><p class="hint">第${g.maxStep() || 0}步为当前最高。弟子阁席位随山门层数开（今 ${g.seatCount('dizige')} 席），亲传、核心弟子皆可入，不足时内门降格任职；空缺由破天阁按阶梯自行补选，也可在此亲择。</p></div>
+      ${q.ok ? '' : `<div class="card tight"><div class="spread"><div><b>阁中无人主事</b><div class="hint" style="margin:2px 0 0">宗务仍按旧档慢办（周期 ×${ELDER.idleMul}），不至积压。指一人入阁即可复常。</div></div><button class="btn sm primary" data-act="org:quorum">指派一人入阁</button></div></div>`}
       ${blocks}
+      <div class="card">
+        <div class="card-head"><div class="t"><h3>亲传弟子</h3><small>第九步 · 名额不设限，唯祖师可册</small></div><span class="tag">${heirs.length} 人</span></div>
+        <div class="list">
+          ${heirs.map((d) => `<div class="item"><div class="main"><div class="name">${esc(d.name)}${d.daohao ? ` <span class="tag">${esc(d.daohao)}</span>` : ''}</div>
+            <div class="meta"><span>${g.realmInfo(d).name}</span><span>${g.rootOf(d).name}</span><span>战力 ${fmt(g.power(d))}</span><span>综合 ${Math.round(g.heirScore(d))}</span>${d.guard ? '<span>镇山中</span>' : ''}</div></div>
+            <div class="act"><button class="btn sm ghost" data-act="heir:guard" data-arg="${d.id}">${d.guard ? '撤守' : '镇山'}</button>
+            <button class="btn sm ghost" data-act="heir:pass" data-arg="${d.id}">传功</button></div></div>`).join('')
+        || '<div class="empty">尚未册封亲传。第八步、双灵根以上、心魔未失控者，可在弟子册中册封。</div>'}
+        </div>
+      </div>
       <div class="card">
         <div class="card-head"><div class="t"><h3>可转职人员</h3><small>第四步以上正式弟子</small></div></div>
         <div class="list">
-          ${g.formal().filter((d) => d.step >= 4).slice(0, 12).map((d) => `
+          ${g.formal().filter((d) => d.step >= 4 && d.step < 9).slice(0, 12).map((d) => `
             <div class="item"><div class="main"><div class="name">${esc(d.name)}</div>
             <div class="meta"><span>第${d.step}步 ${g.stepInfo(d.step).title}</span><span>战力 ${fmt(g.power(d))}</span><span>贡献 ${Math.round(d.gongxian)}</span></div></div>
             <div class="act"><button class="btn sm ghost" data-act="disc:convert" data-arg="${d.id}">转职</button></div></div>`).join('')
@@ -1224,7 +1406,12 @@ export const UI = {
         this.toast(next ? '已切到新版' : '已回退旧版，刷新后仍生效');
         break;
       }
-      case 'filter': { const [k, v] = arg.split(':'); this.discFilter[k] = v; this.renderPanel(); break; }
+      case 'filter': {
+        const [k, v] = arg.split(':');
+        this.discFilter[k] = v;
+        this.discFilter.show = 30;
+        this.renderPanel(); break;
+      }
       case 'pending:read': {
         markSeen(g, (this._matters || []).map((m) => m.ref));
         this.syncBadges(this._matters || []);
@@ -1235,6 +1422,12 @@ export const UI = {
       case 'msg:filter': this.msgFilter = arg; this.renderPanel(); break;
       case 'msg:read': this.markNewsSeen(); this.syncBadges(this._matters || []); this.renderPanel(); this.toast('消息已全部已读'); break;
       case 'matter:go': {
+        /* 阁中无人主事是一步就能办的事，不必再翻到机构页挑人 */
+        if (arg === 'auto:quorum') {
+          const r = g.forceQuorum();
+          this.toast(r.msg || '已指派');
+          done(); break;
+        }
         const m = (this._matters || []).find((x) => x.ref === arg);
         if (!m) break;
         if (m.level === 3) { this.openTemple(); break; }
@@ -1282,11 +1475,47 @@ export const UI = {
       case 'gfx:motion': this.gfx.motion = !this.gfx.motion; this.saveGfx(); this.applyGfx(); this.renderPanel(); break;
       case 'story:open': this.openStory(arg); break;
       case 'evt:open': this.openEvent(); break;
-      case 'recruit': this.helpers.recruit(arg); break;
+      case 'recruit': {
+        /* 数量与赐名从招收卡的输入框读，读完再调，避免一次收两百人全靠猜 */
+        const val = (id, dflt) => {
+          const el = document.getElementById(id);
+          const v = el ? String(el.value || '').trim() : '';
+          return v || dflt;
+        };
+        const count = arg === 'batch'
+          ? (Number(val('recruitBatchCount', '120')) || 120)
+          : (Number(val('recruitCount', '1')) || 1);
+        this.helpers.recruit({
+          kind: arg,
+          count,
+          surname: val('recruitSurname', ''),
+          generation: val('recruitGen', ''),
+        });
+        break;
+      }
       case 'exam': { const r = g.batchExam(); this.toast(r.msg); done(); break; }
       case 'disc:detail': this.openDisciple(Number(arg)); break;
       case 'disc:break': { const r = g.tryBreak(Number(arg)); this.toast(r.msg); done(); break; }
       case 'disc:convert': this.openConvert(Number(arg)); break;
+      case 'disc:more': this.loadMoreDisc(); break;
+      case 'disc:page': {
+        this.discFilter.page = Math.max(0, Number(arg) || 0);
+        this.renderPanel(true);
+        document.getElementById('panelBody').scrollTop = 0;
+        break;
+      }
+      case 'disc:rename': this.openRename(Number(arg)); break;
+      case 'disc:heir': this.openEnshrine(Number(arg)); break;
+      case 'org:quorum': { const r = g.forceQuorum(); this.toast(r.msg); done(); break; }
+      case 'auto:fold': this.autoFold = !this.autoFold; this.renderPanel(); break;
+      case 'auto:review': this.openReview(arg); break;
+      case 'heir:guard': {
+        const d = g.byId(Number(arg));
+        if (!d) break;
+        const r = g.setGuard(d.id, !d.guard);
+        this.toast(r.msg); done(); break;
+      }
+      case 'heir:pass': this.openPassOn(Number(arg)); break;
       case 'disc:back': {
         const d = g.byId(Number(arg));
         if (d) { d.type = 'formal'; d.step = d.prevStep || 4; d.state = 'cultivate'; d.staffInst = null; }
@@ -1327,7 +1556,6 @@ export const UI = {
       case 'dip:gift': { const r = g.diplomacy(arg, 'gift'); this.toast(r.msg); done(); break; }
       case 'dip:press': { const r = g.diplomacy(arg, 'press'); this.toast(r.msg); done(); break; }
       case 'layer:open': { const r = g.openNextLayer(); this.toast(r.msg); done(); break; }
-      case 'disc:heir': { const r = g.designateHeir(Number(arg)); this.toast(r.msg); done(); break; }
       default: break;
     }
   },
@@ -1528,6 +1756,143 @@ export const UI = {
     });
   },
 
+  /* 祖师赐名：任何人、任何时候都能改名，改动记入宗门史 */
+  openRename(id) {
+    const g = this.game; const d = g.byId(id);
+    if (!d) return;
+    const canHao = d.step >= DAOHAO_MIN_STEP || d.type === 'staff';
+    this.modal({
+      title: '祖师赐名',
+      sub: `${g.stepTitle(d)} · ${g.rootOf(d).name} · 原名「${d.name}」`,
+      body: `<div class="field"><label for="renameInput">新名</label>
+        <input id="renameInput" type="text" maxlength="12" value="${esc(d.name)}" autocomplete="off"></div>
+        ${canHao ? `<div class="field"><label for="haoInput">道号</label>
+        <div class="row"><input id="haoInput" type="text" maxlength="12" value="${esc(d.daohao || '')}" placeholder="如 玄真子" autocomplete="off">
+        <button class="btn sm ghost" id="haoRoll" type="button">拟一个</button></div></div>` : ''}
+        <p class="hint">赐名是恩典：忠诚 +4、声望 +2，并写进宗门史。${d.renamed ? `此徒已被赐名 ${d.renamed} 次。` : ''}${canHao ? '' : '道号是内门以上的体面，第七步起才赐。'}</p>`,
+      actions: [
+        {
+          label: '定了',
+          cls: 'primary',
+          onClick: (c) => {
+            const ni = document.getElementById('renameInput');
+            const hi = document.getElementById('haoInput');
+            const run = this.helpers.renameDisciple || ((i, v) => g.renameDisciple(i, v));
+            const r = run(d.id, { name: ni ? ni.value : '', daohao: hi ? hi.value : '' });
+            this.toast(r && r.msg ? r.msg : '已赐名');
+            c();
+            this.renderPanel(true);
+          },
+        },
+        { label: '再想', cls: 'ghost', onClick: (c) => c() },
+      ],
+      onMount: (root) => {
+        const el = root.querySelector('#renameInput');
+        if (el) { el.focus(); el.select(); }
+        const rb = root.querySelector('#haoRoll');
+        const hi = root.querySelector('#haoInput');
+        if (rb && hi) rb.addEventListener('click', () => { hi.value = g.rollDaohao(); });
+      },
+    });
+  },
+
+  /* 第九步册封：唯祖师可定，天赋只是门槛不是保证 */
+  openEnshrine(id) {
+    const g = this.game; const d = g.byId(id);
+    if (!d) return;
+    const chk = g.enshrineCheck(d);
+    if (!chk.ok) return this.toast(chk.why);
+    const r = g.rootOf(d);
+    this.modal({
+      title: '册封亲传',
+      sub: '第九步不由晋升而来，只由祖师亲册',
+      body: `<div class="enshrine-pick">
+        <div class="ep-n">${esc(d.name)}</div>
+        <div class="ep-m">${esc(g.stepTitle(d))} · ${esc(g.realmInfo(d).name)} · ${esc(r.name)}（×${r.mul}）</div>
+        <div class="ep-m">功勋 ${Math.round(d.gongxian)} · 忠诚 ${Math.round(d.loyalty)} · 心魔 ${Math.round(d.demon)}</div>
+      </div>
+      <p class="hint">册封后此徒列第九步亲传，可入弟子阁听事，宗门声望 +40。此操作不可逆。</p>`,
+      actions: [
+        {
+          label: '册为亲传',
+          cls: 'gold',
+          onClick: (c) => {
+            const run = this.helpers.enshrine || ((i) => g.enshrine(i));
+            const res = run(d.id);
+            this.toast(res && res.msg ? res.msg : '已册封');
+            c();
+            this.renderPanel(true);
+            this.syncScene();
+          },
+        },
+        { label: '再候', cls: 'ghost', onClick: (c) => c() },
+      ],
+    });
+  },
+
+  /* 追责：把某一类政务从阁中收回，改由祖师亲裁 */
+  openReview(areaKey) {
+    const g = this.game;
+    const a = AREA_BY_KEY[areaKey];
+    if (!a) return this.toast('无此类政务');
+    this.modal({
+      title: '追责 · ' + a.name,
+      sub: '收回阁中此项自决之权',
+      body: `<p class="hint">收回后，「${a.name}」这一类事务不再由阁中自行处置，改为逐件进待处理请祖师过目。
+        阁中声望 −6。已经办下的事不会倒回去 —— 只能管住往后。</p>`,
+      actions: [
+        {
+          label: '收回此权',
+          cls: 'primary',
+          onClick: (c) => {
+            const run = this.helpers.reviewAuto || ((k) => g.reviewAuto(k));
+            const r = run(areaKey);
+            this.toast(r && r.msg ? r.msg : '已收回');
+            c(); this.renderPanel(true); this.syncScene();
+          },
+        },
+        { label: '算了', cls: 'ghost', onClick: (c) => c() },
+      ],
+    });
+  },
+
+  /* 传功：亲传自降一境，把修为渡给后辈 */
+  openPassOn(id) {
+    const g = this.game; const a = g.byId(id);
+    if (!a) return;
+    if (a.realm <= 18) return this.toast('亲传修为已至底线，再传便跌出九步');
+    const cands = g.formal()
+      .filter((d) => d.id !== a.id && d.realm < a.realm && d.step < 9)
+      .sort((x, y) => y.realm - x.realm || y.loyalty - x.loyalty)
+      .slice(0, 12);
+    if (!cands.length) return this.toast('无合适后辈可受功');
+    this.modal({
+      title: '亲传传功',
+      sub: `${a.name} 现 ${g.realmInfo(a).name} · 传功后自降一境`,
+      body: `<p class="hint">选一名后辈，受功者进一境。亲传寿元 −8、心魔 +5，声望 +5。</p>
+        <div class="enshrine-pick">
+          ${cands.map((d, i) => `<label class="heir-row"><input type="radio" name="passTo" value="${d.id}" ${i === 0 ? 'checked' : ''}>
+            <span class="hr-n">${esc(d.name)}</span>
+            <span class="hr-m">第${d.step}步 · ${esc(g.realmInfo(d).name)} · 忠诚 ${Math.round(d.loyalty)}</span></label>`).join('')}
+        </div>`,
+      actions: [
+        {
+          label: '传功',
+          cls: 'primary',
+          onClick: (c) => {
+            const el = document.querySelector('input[name="passTo"]:checked');
+            if (!el) return;
+            const run = this.helpers.passOn || ((x, y) => g.passOn(x, y));
+            const r = run(a.id, Number(el.value));
+            this.toast(r && r.msg ? r.msg : '已传功');
+            c(); this.renderPanel(true);
+          },
+        },
+        { label: '再想', cls: 'ghost', onClick: (c) => c() },
+      ],
+    });
+  },
+
   openAssign(inst, idx) {
     const g = this.game;
     const cands = g.save.disciples
@@ -1535,7 +1900,7 @@ export const UI = {
       .filter((d) => !Object.values(g.save.posts).some((arr) => arr.includes(d.id)));
     this.modal({
       title: '手动提名',
-      sub: `${INSTITUTIONS.find((i) => i.key === inst).name} · ${INSTITUTIONS.find((i) => i.key === inst).seats[idx]}`,
+      sub: `${INSTITUTIONS.find((i) => i.key === inst).name} · ${g.seatLabel(inst, idx)}`,
       body: cands.length ? `<div class="list">${cands.map((d) => `
         <div class="item"><div class="main"><div class="name">${esc(d.name)}</div>
         <div class="meta"><span>第${d.type === 'staff' ? d.prevStep : d.step}步</span><span>战力 ${fmt(g.power(d))}</span><span>贡献 ${Math.round(d.gongxian)}</span><span>心魔 ${Math.round(d.demon)}</span></div></div>

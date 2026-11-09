@@ -841,11 +841,11 @@ textarea:focus { outline: none; border-color: var(--jade); box-shadow: 0 0 0 3px
   border: 1px solid rgba(120, 102, 76, .18);
   background: rgba(255, 252, 245, .66);
 }
-.rec-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.rec-top { display: flex; flex-direction: column; gap: 3px; }
 .rec-top b { font-size: 14px; color: var(--ink); font-family: var(--f-head); letter-spacing: .04em; }
 .rec-cost {
-  font-size: 11.5px; color: var(--ink-4);
-  font-variant-numeric: tabular-nums; white-space: nowrap;
+  font-size: 11px; color: var(--ink-4);
+  font-variant-numeric: tabular-nums; letter-spacing: .02em;
 }
 .rec-desc { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--ink-4); }
 .rec .btn { width: 100%; margin-top: auto; }
@@ -889,3 +889,244 @@ textarea:focus { outline: none; border-color: var(--jade); box-shadow: 0 0 0 3px
   content: "·"; margin: 0 8px; color: var(--ink-4); font-weight: 400;
 }
 .disc-card .bar { height: 6px; }
+
+/* ---------- 招收：数量与赐名 ---------- */
+.rec-inputs {
+  display: grid; gap: 10px; margin: 2px 0 14px;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.rec-inputs label { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.rec-inputs span { font-size: 11px; color: var(--ink-4); letter-spacing: .06em; }
+.rec-inputs input {
+  width: 100%; min-width: 0; box-sizing: border-box;
+  font: inherit; font-size: 13px; padding: 7px 10px; border-radius: 7px;
+  border: 1px solid rgba(120, 102, 76, .26);
+  background: rgba(255, 253, 248, .86); color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.rec-inputs input:focus {
+  outline: none; border-color: rgba(120, 102, 76, .55);
+  box-shadow: 0 0 0 3px rgba(120, 102, 76, .08);
+}
+.rec-wide {
+  margin-top: 12px; padding: 13px 14px; border-radius: 10px;
+  border: 1px dashed rgba(157, 43, 34, .3);
+  background: rgba(157, 43, 34, .035);
+}
+.rw-top { display: flex; align-items: baseline; justify-content: space-between; gap: 10px; }
+.rw-top b { font-size: 14px; color: var(--ink); font-family: var(--f-head); letter-spacing: .04em; }
+.rw-top span { font-size: 11.5px; color: var(--ink-4); }
+.rec-wide .btn { margin-top: 9px; width: 100%; }
+/* 开山人数与按钮并排，不占满整行 */
+.rec-wide .row { align-items: center; gap: 10px; }
+.rec-wide .row .btn { width: auto; margin-top: 0; }
+.rec-num { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.rec-num span { font-size: 11px; color: var(--ink-4); letter-spacing: .06em; }
+.rec-num input {
+  width: 84px; min-width: 0; box-sizing: border-box;
+  font: inherit; font-size: 13px; padding: 6px 9px; border-radius: 7px;
+  border: 1px solid rgba(120, 102, 76, .26);
+  background: rgba(255, 253, 248, .86); color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+.rec-num input:focus {
+  outline: none; border-color: rgba(120, 102, 76, .55);
+  box-shadow: 0 0 0 3px rgba(120, 102, 76, .08);
+}
+
+/* ---------- 亲传候册 ---------- */
+.heir-card { border-color: rgba(160, 120, 40, .34); background: rgba(253, 249, 238, .82); }
+.heir-list { display: flex; flex-direction: column; gap: 2px; }
+.heir-row {
+  display: flex; align-items: center; gap: 10px;
+  padding: 9px 2px; border-bottom: 1px solid rgba(120, 102, 76, .12);
+}
+.heir-row:last-child { border-bottom: none; }
+.heir-row .hn {
+  font-size: 13.5px; color: var(--ink); font-family: var(--f-head);
+  letter-spacing: .04em; min-width: 4.5em;
+}
+.heir-row .hi { flex: 1; font-size: 11.5px; color: var(--ink-4); }
+.enshrine-pick {
+  padding: 14px 16px; border-radius: 9px; margin-bottom: 10px;
+  border: 1px solid rgba(160, 120, 40, .3);
+  background: rgba(253, 249, 238, .9);
+}
+.enshrine-pick .ep-n {
+  font-size: 19px; font-family: var(--f-head); color: var(--ink); letter-spacing: .1em;
+}
+.enshrine-pick .ep-m { margin-top: 6px; font-size: 12px; color: var(--ink-3); line-height: 1.7; }
+
+/* ---------- 列表分页与搜索 ---------- */
+.disc-search {
+  flex: 1; min-width: 120px; font: inherit; font-size: 12.5px;
+  padding: 6px 10px; border-radius: 7px;
+  border: 1px solid rgba(120, 102, 76, .22);
+  background: rgba(255, 253, 248, .8); color: var(--ink);
+}
+.disc-search:focus { outline: none; border-color: rgba(120, 102, 76, .5); }
+.pager {
+  display: flex; align-items: center; justify-content: center; gap: 14px;
+  padding: 14px 0 4px;
+}
+.pager span { font-size: 11.5px; color: var(--ink-4); font-variant-numeric: tabular-nums; }
+/* 滚动追加：不翻页，只提醒还能往下看 */
+.more-bar {
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 12px 0 6px;
+}
+.more-bar span { font-size: 11.5px; color: var(--ink-4); font-variant-numeric: tabular-nums; }
+/* 按下即反馈：先变一下，再等结算 */
+.btn.is-busy { opacity: .62; transform: scale(.985); }
+.btn.is-busy:disabled { opacity: .62; }
+[data-act].is-busy { transition: none; }
+.matter.is-auto { opacity: .74; border-left-color: rgba(120, 102, 76, .3); }
+.matter.is-auto .m-title { font-weight: 500; }
+.field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 8px; }
+.field label { font-size: 11.5px; color: var(--ink-4); letter-spacing: .06em; }
+.field input {
+  font: inherit; font-size: 15px; padding: 9px 12px; border-radius: 8px;
+  border: 1px solid rgba(120, 102, 76, .28); background: #fffdf8; color: var(--ink);
+  letter-spacing: .08em;
+}
+.field input:focus { outline: none; border-color: rgba(157, 43, 34, .5); box-shadow: 0 0 0 3px rgba(157, 43, 34, .07); }
+
+@media (max-width: 640px) {
+  .rec-inputs { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .heir-row { flex-wrap: wrap; }
+  .heir-row .hi { flex-basis: 100%; }
+}
+
+/* ================= 管理台重构 =================
+ * 原来的毛病：内容挤在左侧 750px、右边空半屏；十个标签被压进 320px 滚不动；
+ * 表单字段与操作按钮各自为政，同一张卡里既有删除又有发布。
+ * 这里统一：宽容器 + 可换行标签 + 页头（标题/说明/本页操作）+ 统一表单网格 + 按钮三级。
+ */
+.admin-wrap { max-width: 1120px; padding: 28px 28px 72px; }
+.admin-wrap .tabs {
+  max-width: none; flex-wrap: wrap; gap: 2px;
+  padding: 4px; border-radius: 10px; overflow: visible;
+}
+.admin-wrap .tabs .tab {
+  flex: 0 0 auto; padding: 8px 15px; border-radius: 7px;
+  font-size: 13px; letter-spacing: .04em; white-space: nowrap;
+}
+.admin-wrap .tabs .tab + .tab { box-shadow: none; }
+
+/* 全局搜索：一个框，按回车落到能查到东西的那一页 */
+.adm-search { display: flex; align-items: center; gap: 10px; flex: none; }
+.adm-search input {
+  width: 230px; font: inherit; font-size: 13px; padding: 8px 11px; border-radius: 8px;
+  border: 1px solid rgba(120, 102, 76, .26); background: rgba(255, 253, 248, .9); color: var(--ink);
+}
+.adm-search input:focus {
+  outline: none; border-color: rgba(157, 43, 34, .5);
+  box-shadow: 0 0 0 3px rgba(157, 43, 34, .07);
+}
+
+/* 二级切换：低频页收进来，一级只留主干 */
+.adm-sub { display: flex; flex-wrap: wrap; gap: 6px; padding: 12px 2px 2px; }
+.adm-chip {
+  font: inherit; font-size: 12.5px; cursor: pointer;
+  padding: 6px 13px; border-radius: 999px; letter-spacing: .04em;
+  border: 1px solid rgba(120, 102, 76, .22); background: rgba(255, 253, 248, .7); color: var(--ink-3);
+}
+.adm-chip:hover { border-color: rgba(120, 102, 76, .4); }
+.adm-chip.is-on {
+  background: rgba(157, 43, 34, .08); border-color: rgba(157, 43, 34, .38);
+  color: var(--seal); font-weight: 600;
+}
+
+/* 页头：一页一件事，右上角只放本页主操作 */
+.adm-head {
+  display: flex; align-items: flex-end; gap: 16px;
+  padding: 4px 2px 14px; margin-bottom: 4px;
+  border-bottom: 1px solid rgba(120, 102, 76, .16);
+}
+.adm-head .ah-t { flex: 1; min-width: 0; }
+.adm-head h3 {
+  margin: 0; font-size: 17px; font-family: var(--f-head);
+  letter-spacing: .08em; color: var(--ink); font-weight: 600;
+}
+.adm-head p { margin: 5px 0 0; font-size: 12px; color: var(--ink-4); line-height: 1.65; }
+.adm-head .ah-act { display: flex; gap: 8px; flex: none; }
+
+/* 统一表单网格：字段少就两列，多就四列，不再固定四列留半排空 */
+.form-grid {
+  display: grid; gap: 12px 14px;
+  grid-template-columns: repeat(auto-fit, minmax(290px, 1fr));
+}
+.form-grid .fg-full { grid-column: 1 / -1; }
+.form-grid label {
+  display: flex; flex-direction: column; gap: 6px;
+  font-size: 11.5px; color: var(--ink-4); letter-spacing: .04em;
+}
+.form-grid input, .form-grid select, .form-grid textarea { font: inherit; font-size: 13px; }
+.form-grid textarea { min-height: 74px; resize: vertical; line-height: 1.6; }
+.adm-acts {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin-top: 14px; padding-top: 13px;
+  border-top: 1px solid rgba(120, 102, 76, .12);
+}
+.adm-acts .hint { margin: 0; flex: 1 1 260px; min-width: 0; }
+
+/* 列表行：主行与元信息分开，不再挤成一行 */
+.adm-wrap .item, #adminStage .item {
+  display: flex; align-items: flex-start; gap: 14px;
+  padding: 13px 2px;
+}
+#adminStage .item .main { flex: 1; min-width: 0; }
+#adminStage .item .main .name {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 13.5px; color: var(--ink); font-family: var(--f-head); letter-spacing: .04em;
+}
+#adminStage .item .main .meta {
+  margin-top: 6px; font-size: 11.5px; color: var(--ink-4);
+  line-height: 1.7; display: flex; flex-wrap: wrap; gap: 4px 0;
+}
+#adminStage .item .main .meta span + span::before {
+  content: "·"; margin: 0 7px; color: var(--ink-4); opacity: .6;
+}
+#adminStage .item .act { flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
+
+/* 指标卡：数值与标签分层，等宽等距 */
+#adminStage .metrics { gap: 12px; }
+#adminStage .metric { padding: 14px 15px; border-radius: 10px; }
+#adminStage .metric .v {
+  font-size: 22px; font-family: var(--f-head); color: var(--ink);
+  font-variant-numeric: tabular-nums; letter-spacing: .02em;
+}
+#adminStage .metric .k { margin-top: 5px; font-size: 11.5px; color: var(--ink-4); }
+#adminStage .metric .k + .k { margin-top: 2px; }
+
+/* 工具条：不挂在别的卡头上，单独一条 */
+.adm-tools {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+  margin-top: 4px;
+}
+.adm-tools .sp { flex: 1; }
+
+@media (max-width: 900px) {
+  .adm-head { flex-direction: column; align-items: stretch; }
+  .adm-head .ah-act { justify-content: flex-start; }
+}
+@media (max-width: 640px) {
+  .admin-wrap { padding: 18px 14px 56px; }
+  .form-grid { grid-template-columns: 1fr 1fr; }
+  #adminStage .item { flex-direction: column; align-items: stretch; }
+  #adminStage .item .act { justify-content: flex-start; }
+  #adminStage .item .act .btn { flex: 1 1 auto; }
+  /* 搜索框在窄屏独占一行，不与返回按钮抢宽度 */
+  .slots-head { flex-direction: column; align-items: stretch; gap: 10px; }
+  .adm-search { width: 100%; }
+  .adm-search input { flex: 1; width: auto; min-width: 0; }
+  .form-grid { grid-template-columns: 1fr; }
+}
+
+/* 窄屏卡片头：标题独占一行，操作按钮落到下方，避免"招收入门"被挤成两行 */
+@media (max-width: 640px) {
+  .card-head { flex-direction: column; align-items: stretch; gap: 8px; }
+  .card-head .t { flex-wrap: wrap; justify-content: space-between; }
+  .card-head > .btn { align-self: flex-start; }
+  .heir-card .card-head { flex-direction: row; flex-wrap: wrap; align-items: center; }
+}

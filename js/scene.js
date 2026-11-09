@@ -58,6 +58,9 @@ export class Scene {
     this.t = 0;
     this.hotspots = {};
     this._bg = null;
+    /* 云雾单独一层离屏：每帧重建渐变最费，而云雾分不出 20 帧与 30 帧 */
+    this._mid = null;
+    this._midT = -1;
     this._raf = 0;
     this._frames = 0;
     this._fpsAcc = 0;
@@ -99,7 +102,7 @@ export class Scene {
   setModel(model) {
     const prev = this.model;
     this.model = Object.assign({}, prev, model || {});
-    if (prev.layers !== this.model.layers) this._bg = null;
+    if (prev.layers !== this.model.layers) { this._bg = null; this._mid = null; }
     this.updateBadges();
     this._dirty = true;
     if (!this.motion) this.frame(0, true);
@@ -120,6 +123,7 @@ export class Scene {
     this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     this.layout();
     this._bg = null;
+    this._mid = null;
     this.positionHotspots();
     if (!this.motion) this.frame(0, true);
   }
@@ -307,9 +311,12 @@ export class Scene {
     const step = (ts) => {
       this._raf = requestAnimationFrame(step);
       if (this.paused || document.hidden) return;
-      /* 限帧：场景是静态水墨底 + 几处缓动，30 帧已够，省一半合成开销 */
+      /* 限帧：场景是静态水墨底 + 几处缓动。
+         有飘字、有选中、有悬停时 30 帧；什么都没动就降到 20 帧 —— 省电也省合成。 */
+      const busy = this.selected || this.hovered
+        || (this.model && this.model.floaters && Object.keys(this.model.floaters).length > 0);
       const gap = ts - (this._drawAt || 0);
-      if (gap < 1000 / 30) return;
+      if (gap < 1000 / (busy ? 30 : 20)) return;
       const dt = Math.min(96, gap);
       this._drawAt = ts;
       this.frame(dt / 1000, false);
@@ -359,8 +366,23 @@ export class Scene {
     const ctx = this.ctx;
     ctx.clearRect(0, 0, this.W, this.H);
     ctx.drawImage(this._bg, 0, 0, this.W, this.H);
-    this.drawClouds(ctx);
-    this.drawMist(ctx);
+    /* 云雾层：20 帧重画一次就够，中间帧直接贴图，省掉一半路径与渐变 */
+    if (!this._mid) {
+      const mc = document.createElement('canvas');
+      mc.width = Math.round(this.W * this.dpr);
+      mc.height = Math.round(this.H * this.dpr);
+      mc.getContext('2d').setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+      this._mid = mc;
+      this._midT = -1;
+    }
+    if (!this.motion || this.t - this._midT > 0.05) {
+      const mg = this._mid.getContext('2d');
+      mg.clearRect(0, 0, this.W, this.H);
+      this.drawClouds(mg);
+      this.drawMist(mg);
+      this._midT = this.t;
+    }
+    ctx.drawImage(this._mid, 0, 0, this.W, this.H);
     this.drawFigures(ctx);
     this.drawGlow(ctx);
     this.drawSelection(ctx);
@@ -1243,17 +1265,66 @@ export class Scene {
   }
 
   /* 未开辟的山：整片淡墨压过去，只压一层，不逐级刷白条 */
+  /* 未开辟的山：只压一层薄雾，让山形与岩壁透出来。
+     之前压得太重（.46），六层存档的上半座山直接白成一张纸。 */
   paintFog(g) {
     const layers = this.model.layers || 1;
     if (layers >= 10) return;
     const { L } = this;
     const top = L.levels[Math.min(9, layers)] ? L.levels[Math.min(9, layers)].y : L.peakY;
     const grd = g.createLinearGradient(0, L.peakY - 20, 0, top + 10);
-    grd.addColorStop(0, 'rgba(247,241,229,.46)');
-    grd.addColorStop(0.62, 'rgba(246,239,226,.30)');
+    grd.addColorStop(0, 'rgba(247,241,229,.30)');
+    grd.addColorStop(0.55, 'rgba(246,239,226,.16)');
     grd.addColorStop(1, 'rgba(244,236,221,0)');
     g.fillStyle = grd;
     g.fillRect(-20, L.peakY - 40, this.W + 40, top - L.peakY + 60);
+
+    /* 云带：横着缠两道，把空山断开，别让上半部整片空着 */
+    const band = (y, h, a) => {
+      const c = g.createLinearGradient(0, y - h, 0, y + h);
+      c.addColorStop(0, 'rgba(250,246,236,0)');
+      c.addColorStop(0.45, `rgba(252,248,240,${a})`);
+      c.addColorStop(0.62, `rgba(248,243,232,${a * 0.8})`);
+      c.addColorStop(1, 'rgba(250,246,236,0)');
+      g.fillStyle = c;
+      g.beginPath();
+      g.ellipse(L.cx + (this.W * 0.04), y, this.W * 0.42, h, 0, 0, TAU);
+      g.fill();
+    };
+    const peakGap = (top - L.peakY) || 1;
+    band(L.peakY + peakGap * 0.26, Math.max(16, peakGap * 0.075), 0.72);
+    if (peakGap > 380) band(L.peakY + peakGap * 0.52, Math.max(13, peakGap * 0.06), 0.58);
+
+    /* 雾中远景：未开辟的层画极淡的屋脊剪影，让上半座山看着"已经在那里"，
+       而不是一片待填的白。只画形，不画热点，点不到。 */
+    g.save();
+    g.strokeStyle = 'rgba(96,80,58,.16)';
+    g.fillStyle = 'rgba(120,102,76,.055)';
+    g.lineWidth = 1;
+    for (let i = layers; i < 10; i++) {
+      const lv = L.levels[i];
+      if (!lv) continue;
+      const w = Math.min(lv.hl, lv.hr);
+      if (w < 60) continue;
+      const y = lv.y - 2;
+      /* 每层三座，错开一点都不至于排成队 */
+      const offs = [-0.42, 0.02, 0.4];
+      for (let k = 0; k < offs.length; k++) {
+        const bw = w * (0.13 + ((i + k) % 3) * 0.03);
+        const bh = bw * 0.62;
+        const x = L.cx + offs[k] * w * 0.86;
+        g.beginPath();
+        g.moveTo(x - bw * 0.62, y);
+        g.lineTo(x - bw * 0.62, y - bh * 0.62);
+        g.lineTo(x, y - bh);
+        g.lineTo(x + bw * 0.62, y - bh * 0.62);
+        g.lineTo(x + bw * 0.62, y);
+        g.closePath();
+        g.fill();
+        g.stroke();
+      }
+    }
+    g.restore();
   }
 
   /* ---------- 逐帧动画层 ---------- */

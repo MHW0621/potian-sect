@@ -2,7 +2,9 @@
  * 事项不落冗余副本：全部由存档状态推导，因此多端看到的待办天然一致。
  * 只有「已读 / 暂缓」这类个人处置状态存在 matterState 里。
  */
-import { INSTITUTIONS, RES_BY_KEY, REGIONS, LAYERS } from './config.js';
+import { INSTITUTIONS, RES_BY_KEY, REGIONS, LAYERS, AREAS, AREA_BY_KEY } from './config.js';
+
+const AREA_BY_LOG = Object.fromEntries(AREAS.map((a) => [a.log, a]));
 import { STORY_BY_ID } from './story.js';
 
 export const LEVEL = {
@@ -20,7 +22,13 @@ export const BUILDING_NAMES = {
 
 const SNOOZE_DAYS = 45;
 
-/* ---------- 待办推导 ---------- */
+/* ---------- 待办推导 ----------
+ * 两条铁律：
+ * ① 破天阁能办的，不进待办。席位补缺、弟子突破、选拔排期、疗伤归队都是阁中日常，
+ *    这里只出一条「已处置·报备」汇总（auto: true），不再逐人逐席地堆到祖师案上。
+ * ② 待办条数不能随弟子人数增长。一千名弟子只该有一条汇总，不是一千条。
+ * 真正要祖师拍板的只有：剧情、异动、亲传册封、粮荒、外交交恶、山门无人。
+ */
 export function deriveMatters(g) {
   const s = g.save;
   const out = [];
@@ -37,7 +45,7 @@ export function deriveMatters(g) {
     if (!n) return;
     add({
       ref: `story:${id}`, level: 3, kind: 'story', building: 'temple',
-      title: n.title, desc: `第${n.act}幕 · 已候 ${Math.max(1, Math.min(99, 3))} 日`,
+      title: n.title, desc: `第${n.act}幕 · 候祖师一言`,
       act: { type: 'story', arg: id },
     });
   });
@@ -49,44 +57,36 @@ export function deriveMatters(g) {
     });
   }
 
-  /* 席位空缺 */
-  INSTITUTIONS.forEach((inst) => {
-    (s.posts[inst.key] || []).forEach((id, i) => {
-      if (id) return;
-      add({
-        ref: `vac:${inst.key}:${i}`, level: 2, kind: 'seat',
-        building: inst.key === 'hufatang' ? 'hall' : inst.key === 'zhanglaohui' ? 'council' : 'dorm',
-        title: `${inst.name}·${inst.seats[i]}空缺`, desc: '位不可久虚',
-        act: { type: 'panel', arg: 'org' },
-      });
-    });
-  });
-
-  /* 弟子瓶颈与考核 */
+  /* 亲传候册：第九步唯祖师可定，这是阁中不敢代劳的一件事 */
   const bn = g.formal().filter((d) => d.state === 'bottleneck');
-  bn.forEach((d) => {
-    if (d.step >= 8) {
-      add({
-        ref: `heir:${d.id}`, level: 2, kind: 'heir', building: 'dorm',
-        title: `${d.name} 待定亲传`, desc: '第八步晋第九步，唯祖师可定',
-        act: { type: 'panel', arg: 'disciples' },
-      });
-    } else if (d.step === 3) {
-      add({
-        ref: `exam:${d.id}`, level: 2, kind: 'exam', building: 'arena',
-        title: `${d.name} 候宗内选拔`, desc: `三晋四，已考 ${d.tries3} 次`,
-        act: { type: 'panel', arg: 'disciples' },
-      });
-    } else {
-      add({
-        ref: `brk:${d.id}`, level: 2, kind: 'break', building: 'dorm',
-        title: `${d.name} 修为已满`, desc: `第${d.step}步 · 突破率 ${Math.round(g.breakChance(d) * 100)}%`,
-        act: { type: 'panel', arg: 'disciples' },
-      });
-    }
-  });
+  const ready = [];
+  for (const d of bn) {
+    if (d.step >= 8 && g.enshrineCheck && g.enshrineCheck(d).ok) ready.push(d);
+  }
+  if (ready.length) {
+    ready.sort((a, b) => g.heirScore(b) - g.heirScore(a));
+    const lead = ready[0];
+    add({
+      ref: 'heir:pool', level: 3, kind: 'heir', building: 'temple',
+      title: `${ready.length} 人候册亲传`,
+      desc: `首推 ${lead.name}（${g.rootOf(lead).name} · 综合 ${Math.round(g.heirScore(lead))}）`,
+      act: { type: 'panel', arg: 'disciples' },
+    });
+  }
 
-  /* 粮秣 */
+  /* 阁中无主：自治里唯一需要祖师动一下手的事。
+   * 阁中不会因此停摆（按旧档慢办），所以这条是"请指个人"，不是"救命"。 */
+  const quorum = g.elderQuorum ? g.elderQuorum() : { ok: true };
+  if (!quorum.ok) {
+    add({
+      ref: 'auto:quorum', level: 3, kind: 'quorum', building: 'dorm',
+      title: '阁中无人主事',
+      desc: '弟子阁空无一人，宗务只按旧档慢办。请祖师指一人入阁。',
+      act: { type: 'quorum' },
+    });
+  }
+
+  /* 粮秣：真正的宗门生死，留 */
   if ((s.res.liangshi || 0) < 200) {
     add({
       ref: 'res:liangshi', level: (s.res.liangshi || 0) < 60 ? 3 : 2, kind: 'res', building: 'field',
@@ -95,22 +95,12 @@ export function deriveMatters(g) {
     });
   }
 
-  /* 伤者 */
-  const inj = g.save.disciples.filter((d) => d.state === 'injured');
-  if (inj.length >= 2) {
-    add({
-      ref: 'heal:injured', level: 1, kind: 'heal', building: 'hut',
-      title: `${inj.length} 人闭关疗伤`, desc: '破天阁已排期，可赐丹加速',
-      act: { type: 'panel', arg: 'disciples' },
-    });
-  }
-
-  /* 无弟子可派 */
-  if (!g.save.disciples.length) {
+  /* 山门无人：开局指引 */
+  if (!s.disciples.length) {
     add({ ref: 'recruit:none', level: 2, kind: 'recruit', building: 'gate', title: '山门无人', desc: '先收第一批弟子', act: { type: 'panel', arg: 'disciples' } });
   }
 
-  /* 势力交恶 */
+  /* 势力交恶：要祖师定外交基调 */
   Object.entries(s.relations || {}).forEach(([k, v]) => {
     if (v > -2) return;
     add({
@@ -120,7 +110,65 @@ export function deriveMatters(g) {
     });
   });
 
-  out.sort((a, b) => b.level - a.level);
+  /* ---------- 以下是阁中已办、只作报备 ---------- */
+  const auto = [];
+  const vac = [];
+  INSTITUTIONS.forEach((inst) => {
+    (s.posts[inst.key] || []).forEach((id, i) => { if (!id) vac.push(`${inst.name}·${g.seatLabel(inst.key, i)}`); });
+  });
+  if (vac.length) {
+    auto.push({
+      ref: 'auto:seat', level: 1, auto: true, kind: 'seat', building: 'dorm',
+      title: `${vac.length} 席待补`,
+      desc: `阁议按施政次序推举，${vac[0]} 等已在议`,
+      act: { type: 'panel', arg: 'org' },
+    });
+  }
+  const brk = bn.filter((d) => d.step < 8);
+  if (brk.length) {
+    auto.push({
+      ref: 'auto:break', level: 1, auto: true, kind: 'break', building: 'dorm',
+      title: `${brk.length} 人修为已满`,
+      desc: '阁中已排期，按例推进或留级',
+      act: { type: 'panel', arg: 'disciples' },
+    });
+  }
+  const inj = s.disciples.filter((d) => d.state === 'injured');
+  if (inj.length) {
+    auto.push({
+      ref: 'auto:heal', level: 1, auto: true, kind: 'heal', building: 'hut',
+      title: `${inj.length} 人闭关疗伤`,
+      desc: '阁中已排期，无需过问',
+      act: { type: 'panel', arg: 'disciples' },
+    });
+  }
+  /* 阁中自办的其余几类：从宗门史里归拢近 180 日，按事类各出一条。
+     一条百件也只占一行 —— 报备的条数同样不能随弟子数增长。 */
+  const log = (s.story && s.story.log) || [];
+  const since = s.day - 180;
+  const bucket = {};
+  for (const e of log) {
+    if (e.kind !== 'auto' || e.day < since) continue;
+    const a = AREA_BY_LOG[e.title];
+    /* 补缺与疗养已按当前状态出过一条，不必再从史里数一遍 */
+    if (!a || a.key === 'seat' || a.key === 'heal') continue;
+    const b = bucket[a.key] || (bucket[a.key] = { a, n: 0, last: null });
+    b.n++;
+    if (!b.last) b.last = e;
+  }
+  for (const k of Object.keys(bucket)) {
+    const b = bucket[k];
+    auto.push({
+      ref: `auto:${k}`, level: 1, auto: true, kind: 'auto', area: k, building: 'pavilion',
+      title: `${b.a.name} · ${b.n} 件`,
+      desc: `最近：${b.last.label} — ${b.last.result}`,
+      act: { type: 'panel', arg: 'autonomy' },
+    });
+  }
+
+  out.push(...auto);
+
+  out.sort((a, b) => (b.auto ? 0 : 1) - (a.auto ? 0 : 1) || b.level - a.level);
   return out;
 }
 
@@ -323,7 +371,7 @@ export function memorials(g) {
       && !Object.values(g.save.posts).some((arr) => arr.includes(d.id)));
     list.push({
       ref: `vac:${inst.key}:${i}`, kind: 'seat', seal: '缺',
-      title: `${inst.name}·${inst.seats[i]}虚位`, from: `${inst.name} · 合议`,
+      title: `${inst.name}·${g.seatLabel(inst.key, i)}虚位`, from: `${inst.name} · 合议`,
       cause: `此席空缺已久。合于资格者 ${cands.length} 人${cands.length ? `，以 ${cands[0].name} 总评最高` : ''}。`,
       impact: '席位久空，机构加成不生效，宗务积压。',
       note: '阁议可代推，但祖师亦可另择。',
