@@ -20,6 +20,7 @@ export const UI = {
   helpers: null,
   panel: 'overview',
   msgs: [],
+  mods: {},
   _storyOpen: false,
   discFilter: { type: 'all', sort: 'power', q: '' },
 
@@ -40,10 +41,34 @@ export const UI = {
         this.closeDrawer();
       });
     });
+    this.applyModules(helpers.modules || game.mod);
     this.render();
   },
 
+  /* 全服模块开关：关闭的入口隐藏，误入时提示维护中 */
+  applyModules(mods) {
+    this.mods = mods || {};
+    const map = { org: 'org', workshop: 'prod', tasks: 'tasks', world: 'world', battle: 'battle', rank: 'rank' };
+    document.querySelectorAll('.nav-item[data-panel]').forEach((b) => {
+      const k = map[b.dataset.panel];
+      const off = k && this.mods[k] === false;
+      b.classList.toggle('hide', !!off);
+    });
+    const cur = map[this.panel];
+    if (cur && this.mods[cur] === false) this.setPanel('overview');
+  },
+
+  panelClosed(name) {
+    const map = { org: 'org', workshop: 'prod', tasks: 'tasks', world: 'world', battle: 'battle', rank: 'rank' };
+    const k = map[name];
+    return !!(k && this.mods[k] === false);
+  },
+
   setPanel(name) {
+    if (this.panelClosed(name)) {
+      this.toast('该模块维护中，暂未开放');
+      return;
+    }
     this.panel = name;
     document.querySelectorAll('.nav-item[data-panel]').forEach((b) => b.classList.toggle('is-on', b.dataset.panel === name));
     this.renderPanel();
@@ -574,6 +599,7 @@ export const UI = {
           </div>
           <div class="row" style="margin-top:12px;flex-wrap:wrap">
             <button class="btn ghost" data-act="passwd">修改口令</button>
+            <button class="btn ghost" data-act="sessions">登录设备</button>
             ${a.role === 'admin' ? '<button class="btn gold" data-act="admin">管理台</button>' : ''}
           </div>
           <p class="hint">账号由宗门管理方统一开立，站点不提供手机号、邮箱等自助注册入口。</p>`;
@@ -654,6 +680,7 @@ export const UI = {
       case 'save:now': this.helpers.forceSave(); break;
       case 'signout': this.helpers.signOut(); break;
       case 'passwd': this.helpers.changePass && this.helpers.changePass(); break;
+      case 'sessions': this.helpers.sessions && this.helpers.sessions(); break;
       case 'admin': this.helpers.openAdmin && this.helpers.openAdmin(); break;
       case 'dip:gift': { const r = g.diplomacy(arg, 'gift'); this.toast(r.msg); this.render(); this.helpers.autoSave && this.helpers.autoSave(); break; }
       case 'dip:press': { const r = g.diplomacy(arg, 'press'); this.toast(r.msg); this.render(); this.helpers.autoSave && this.helpers.autoSave(); break; }

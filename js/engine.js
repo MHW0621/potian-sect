@@ -83,8 +83,19 @@ function baseLife(d) {
 export class Game {
   constructor(save, hooks = {}) {
     this.save = save;
-    this.hooks = hooks; // { onMsg, onStory, onDirty }
+    this.hooks = hooks; // { onMsg, onStory, onDirty, onLog, modules }
     this._msgQueue = [];
+    this.mod = Object.assign(
+      { battle: true, rank: true, prod: true, story: true, world: true, tasks: true, org: true },
+      hooks.modules || {}
+    );
+  }
+
+  /* 全服开关：关闭的模块入口隐藏、相关结算暂停，数据不动 */
+  setModules(m) { Object.assign(this.mod, m || {}); }
+  modOpen(k) { return this.mod[k] !== false; }
+  _log(module, action, detail) {
+    this.hooks.onLog && this.hooks.onLog(module, action, detail || {});
   }
 
   /* ---------- 建宗 ---------- */
@@ -316,6 +327,7 @@ export class Game {
   }
 
   _economy(days) {
+    if (!this.modOpen('prod')) return;
     const s = this.save;
     const sv = this.servants().length;
     const st = this.staff().length;
@@ -385,8 +397,9 @@ export class Game {
         s.missions = s.missions.filter((j) => j.id !== job.id);
         const tpl = MISSION_TEMPLATES.find((t) => t.key === job.tpl);
         const rw = {};
-        for (const [k, [a, b]] of Object.entries(tpl.reward)) {
+        for (const [k, v] of Object.entries(tpl.reward || {})) {
           if (k === 'gongxian') continue;
+          const [a, b] = Array.isArray(v) ? v : [Number(v) || 0, Number(v) || 0];
           rw[k] = ri(a, b);
         }
         this.addRes(rw);
@@ -404,7 +417,10 @@ export class Game {
         s.expeditions = s.expeditions.filter((j) => j.id !== job.id);
         const reg = REGIONS.find((r) => r.key === job.region);
         const rw = {};
-        for (const [k, [a, b]] of Object.entries(reg.res)) rw[k] = ri(a, b);
+        for (const [k, v] of Object.entries(reg.res || {})) {
+          const [a, b] = Array.isArray(v) ? v : [Number(v) || 0, Number(v) || 0];
+          rw[k] = ri(a, b);
+        }
         this.addRes(rw);
         this.addRenown(ri(3, 9));
         let lost = 0;
@@ -425,6 +441,7 @@ export class Game {
   }
 
   _checkStory() {
+    if (!this.modOpen('story')) return;
     const s = this.save;
     for (const node of STORY_NODES) {
       if (s.story.done.includes(node.id) || s.story.pending.includes(node.id)) continue;
@@ -438,6 +455,7 @@ export class Game {
   }
 
   _randomEvent() {
+    if (!this.modOpen('story')) return;
     const s = this.save;
     const stage = s.sect.stage;
     const pool = RANDOM_EVENTS.filter((e) => !e.minStage || stage >= e.minStage);
@@ -471,6 +489,7 @@ export class Game {
   }
 
   _promote(d, force = false) {
+    this._log('disciple', 'promote', { save: this.save.sect.name, name: d.name, to: d.step + 1, day: this.save.day });
     const s = this.save;
     const si = this.stepInfo(d.step);
     d.step = Math.min(9, d.step + 1);
@@ -572,6 +591,7 @@ export class Game {
   }
 
   assignSeat(inst, idx, id) {
+    if (!this.modOpen('org')) return { ok: false, msg: '机构模块未开放' };
     const d = this.byId(id);
     if (!d) return { ok: false, msg: '弟子不存在' };
     if (!this.eligible(inst, d)) return { ok: false, msg: '该弟子不满足任职资格' };
@@ -651,6 +671,7 @@ export class Game {
     this.save.story.done.push(nodeId);
     this.save.story.log.unshift({ id: nodeId, title: node.title, label: opt.label, result: opt.result, day: this.save.day });
     opt.apply(this);
+    this._log('story', 'node', { save: this.save.sect.name, node: nodeId, opt: opt.label, day: this.save.day });
     this.msg(`${node.title}：${opt.label}`, 'story');
     this.hooks.onDirty && this.hooks.onDirty();
   }
@@ -661,6 +682,7 @@ export class Game {
     const opt = ev.options[idx];
     this.applyEffect(opt.effect || {});
     this.save.story.log.unshift({ id: ev.key, title: ev.name, label: opt.label, result: opt.result, day: this.save.day });
+    this._log('story', 'event', { save: this.save.sect.name, event: ev.key, opt: opt.label, day: this.save.day });
     this.msg(`${ev.name}：${opt.label}`, 'story');
     this.pendingEvent = null;
     this.save.story.pendingEvt = null;
@@ -800,6 +822,7 @@ export class Game {
     return MISSION_TEMPLATES.filter((m) => m.lv <= lv + 1);
   }
   startMission(tplKey, dIds) {
+    if (!this.modOpen('tasks')) return { ok: false, msg: '任务模块未开放' };
     const tpl = MISSION_TEMPLATES.find((t) => t.key === tplKey);
     if (!tpl || !dIds.length) return { ok: false, msg: '请选择弟子' };
     if (this.save.missions.length >= 3) return { ok: false, msg: '同时最多进行三件任务' };
@@ -808,6 +831,7 @@ export class Game {
     return { ok: true, msg: `已派出【${tpl.name}】，${tpl.days} 日后归来` };
   }
   startExpedition(regionKey, dIds, items = 0) {
+    if (!this.modOpen('world')) return { ok: false, msg: '大世界模块未开放' };
     const reg = REGIONS.find((r) => r.key === regionKey);
     if (!reg || !dIds.length) return { ok: false, msg: '请选择弟子' };
     if (this.save.expeditions.length >= 2) return { ok: false, msg: '同时最多两支派遣队' };
@@ -824,8 +848,9 @@ export class Game {
     this.save.battle[kind] = list.slice(0, 5);
     return { ok: true, msg: '编队已保存' };
   }
-  canChallenge() { return this.save.day - this.save.battle.lastChallenge >= 3; }
+  canChallenge() { return this.modOpen('battle') && this.save.day - this.save.battle.lastChallenge >= 3; }
   challenge(opp) {
+    if (!this.modOpen('battle')) return { win: false, closed: true };
     const myPower = this.teamPower(this.save.battle.atk.length ? this.save.battle.atk : null);
     const oppPower = Math.max(30, opp.renown * 1.6 + opp.max_step * 60 + ri(-40, 60));
     this.save.battle.lastChallenge = this.save.day;
@@ -846,6 +871,7 @@ export class Game {
       this.save.stats.losses++;
       this.msg(`对战【${opp.name}】失利，损失灵石 ${loss}。`, 'bad');
     }
+    this._log('battle', win ? 'win' : 'lose', { save: this.save.sect.name, opp: opp.name, my: report.myPower, theirs: report.oppPower, day: this.save.day });
     this.save.battle.reports.unshift(report);
     if (this.save.battle.reports.length > 30) this.save.battle.reports.pop();
     return report;

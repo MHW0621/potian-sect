@@ -7,7 +7,6 @@ import { Admin } from './admin.js';
 
 const DAYS_PER_SEC = DAYS_PER_TICK / (TICK_MS / 1000);
 const AUTOSAVE_MS = 8000;
-const SLOT_LIMIT = 3;
 
 const state = {
   session: null,
@@ -18,6 +17,7 @@ const state = {
   opponents: [],
   dirty: false,
   saving: false,
+  flags: { announcement: '', modules: {} },
 };
 
 /* ---------- 视图切换 ---------- */
@@ -35,12 +35,16 @@ async function boot() {
   bindSlotView();
   bindGameChrome();
 
+  bindPassView();
+
   const acc = await cloud.restore();
-  if (acc) enterSlots(acc);
+  if (acc && acc.mustChange) showPass(acc);
+  else if (acc) enterSlots(acc);
   else show('view-auth');
 
   setInterval(loop, TICK_MS);
   setInterval(() => { if (state.dirty) autoSave(); }, AUTOSAVE_MS);
+  setInterval(() => { if (state.session) loadFlags(); }, 60000);
   window.addEventListener('beforeunload', () => { if (state.dirty) { try { flush(false); } catch (e) {} } });
 }
 
@@ -59,10 +63,48 @@ function bindAuth() {
     if (!r.ok) return setHint(r.msg, true);
     document.getElementById('authPass').value = '';
     setHint('账号由宗门管理方统一开立，此处不开放自助注册。');
-    enterSlots(r.account);
+    if (r.account && r.account.mustChange) showPass(r.account);
+    else enterSlots(r.account);
   });
 
   document.getElementById('btnSignOut').addEventListener('click', doSignOut);
+}
+
+/* ---------- 首次登录强制改密 ---------- */
+let passAccount = null;
+
+function showPass(acc) {
+  passAccount = acc;
+  show('view-pass');
+  const hint = document.getElementById('passHint');
+  hint.textContent = '改密后，其他设备上的登录将立即失效。';
+  hint.style.color = '';
+  document.getElementById('pcOld').value = '';
+  document.getElementById('pcNew').value = '';
+  document.getElementById('pcNew2').value = '';
+}
+
+function bindPassView() {
+  document.getElementById('passForm').addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const oldPass = document.getElementById('pcOld').value || '';
+    const n1 = document.getElementById('pcNew').value || '';
+    const n2 = document.getElementById('pcNew2').value || '';
+    const hint = document.getElementById('passHint');
+    if (!oldPass) return (hint.textContent = '请输入当前口令', hint.style.color = 'var(--seal)');
+    if (n1.length < 6) return (hint.textContent = '新口令至少 6 位', hint.style.color = 'var(--seal)');
+    if (n1 !== n2) return (hint.textContent = '两次输入的新口令不一致', hint.style.color = 'var(--seal)');
+    if (n1 === oldPass) return (hint.textContent = '新口令不能与初始口令相同', hint.style.color = 'var(--seal)');
+    const btn = document.getElementById('btnPass');
+    btn.disabled = true; btn.textContent = '提交中';
+    const r = await cloud.changePassword(oldPass, n1);
+    btn.disabled = false; btn.textContent = '改 密 入 宗';
+    if (!r.ok) { hint.textContent = r.msg; hint.style.color = 'var(--seal)'; return; }
+    if (passAccount) passAccount.mustChange = false;
+    await enterSlots(passAccount || {});
+  });
+
+  document.getElementById('btnPassOut').addEventListener('click', doSignOut);
 }
 
 function setHint(text, bad) {
@@ -111,6 +153,26 @@ async function enterSlots(session) {
   }
   await refreshRows();
   renderSlots();
+  loadFlags();
+}
+
+/* 全服开关与公告：进入存档页时拉一次，进入游戏后每分钟校准 */
+async function loadFlags() {
+  state.flags = await cloud.flags();
+  renderNotice();
+  if (state.game) {
+    state.game.setModules(state.flags.modules || {});
+    UI.applyModules(state.flags.modules || {});
+    if (UI.helpers) UI.helpers.modules = state.flags.modules || {};
+  }
+}
+
+function renderNotice() {
+  const bar = document.getElementById('noticeBar');
+  if (!bar) return;
+  const text = (state.flags && state.flags.announcement) || '';
+  bar.hidden = !text;
+  bar.innerHTML = text ? `<b>宗门公告</b><span>${esc(text)}</span>` : '';
 }
 
 async function refreshRows() {
@@ -125,7 +187,8 @@ async function refreshRows() {
 function renderSlots() {
   const grid = document.getElementById('slotGrid');
   const cards = [];
-  for (let i = 0; i < SLOT_LIMIT; i++) {
+  const limit = cloud.slotLimit();
+  for (let i = 0; i < limit; i++) {
     const row = state.rows.find((r) => r.slot === i);
     if (row) {
       const d = row.data || {};
@@ -208,6 +271,14 @@ async function openSlot(slot) {
   try {
     const row = await cloud.loadSave(slot);
     if (!row) return toast('存档不存在');
+    if (row.sealed) {
+      return UI.modal({
+        title: '存档维护中',
+        sub: `${row.sect_name} · 槽位 ${row.slot + 1}`,
+        body: '<p class="hint">该存档正在维护，暂时只读。你的弟子、资源与剧情都完好保留，稍后再来或联系宗门管理方。</p>',
+        actions: [{ label: '知道了', cls: 'primary', onClick: (c) => c() }],
+      });
+    }
     startGame(row, row.revision);
   } catch (e) {
     toast(e.message);
@@ -221,6 +292,8 @@ function startGame(row, revision) {
   save.slot = row.slot;
 
   const game = new Game(save, {
+    modules: state.flags.modules || {},
+    onLog: (module, action, detail) => cloud.logEvent(module, action, detail),
     onMsg: (text, type) => UI.pushMsg(text, type),
     onStory: (id) => {
       if (id === '__event__') { if (UI.panel === 'overview') UI.openEvent(); }
@@ -248,6 +321,8 @@ function startGame(row, revision) {
     ranking: state.ranking,
     opponents: state.opponents,
     account: cloud.currentAccount(),
+    modules: state.flags.modules || {},
+    sessions: () => openSessions(),
     openAdmin: () => {
       Admin.helpers = { back: () => { show('view-game'); UI.render(); } };
       Admin.open();
@@ -269,6 +344,7 @@ function startGame(row, revision) {
     UI.render();
   }
 
+  loadFlags();
   refreshRank();
 }
 
@@ -301,6 +377,11 @@ async function flush(explicit) {
     } else if (r.conflict) {
       toast('数据已在其他设备更新，已为你刷新');
       await openSlot(g.save.slot);
+    } else if (r.sealed) {
+      toast('存档维护中，本次改动未写入云端');
+      state.dirty = false;
+    } else if (r.slotLimit) {
+      toast(r.msg || '存档槽位不足');
     } else if (r.auth) {
       toast('登录已失效，请重新入宗');
       doSignOut();
@@ -383,6 +464,13 @@ function recruit(kind) {
 
 /* ---------- 榜单与对战 ---------- */
 async function refreshRank() {
+  if (state.flags && state.flags.modules && state.flags.modules.rank === false) {
+    state.ranking = [];
+    state.opponents = [];
+    if (UI.helpers) { UI.helpers.ranking = []; UI.helpers.opponents = []; }
+    if (UI.panel === 'rank' || UI.panel === 'battle') UI.renderPanel();
+    return;
+  }
   const list = await cloud.fetchRanking(50);
   state.ranking = list;
   const me = state.game ? state.game.save.sect.name : '';
@@ -395,6 +483,7 @@ async function refreshRank() {
 async function doBattle(oppName) {
   const g = state.game;
   if (!g) return;
+  if (!g.modOpen('battle')) return toast('对战模块维护中，暂未开放');
   if (!g.canChallenge()) return toast('邀约冷却中（每三 game 日一次）');
   if (!g.save.battle.atk.length) return toast('请先设置进攻编队');
   const opp = state.opponents.find((o) => o.sect_name === oppName);
@@ -442,6 +531,29 @@ function openRedeem() {
       } },
       { label: '取消', cls: 'ghost', onClick: (c) => c() },
     ],
+  });
+}
+
+/* ---------- 登录设备 ---------- */
+async function openSessions() {
+  const list = await cloud.sessions();
+  UI.modal({
+    title: '登录设备',
+    sub: '同一账号可在多台设备上同时在线',
+    body: `<div class="list">${list.length ? list.map((s) => `<div class="item">
+      <div class="main"><div class="name">${esc(s.dev || '未知设备')} ${s.current ? '<span class="pill jade">当前</span>' : ''}</div>
+      <div class="meta"><span>登录 ${esc(s.created)}</span><span>活跃 ${esc(s.seen)}</span></div></div>
+      <div class="act">${s.current ? '' : `<button class="btn sm ghost danger" data-sess="${esc(s.sid)}">下线</button>`}</div>
+    </div>`).join('') : '<div class="item"><div class="main"><div class="name">没有其他设备</div></div></div>'}</div>
+    <p class="hint">下线后该设备需重新登录。修改口令会使全部设备立即失效。</p>`,
+    actions: [{ label: '关闭', cls: 'ghost', onClick: (c) => c() }],
+    onMount: (root) => {
+      root.querySelectorAll('[data-sess]').forEach((b) => b.addEventListener('click', async () => {
+        const ok = await cloud.revokeSession(b.dataset.sess);
+        toast(ok ? '已下线' : '操作失败');
+        if (ok) { const c = document.querySelector('.modal-foot .btn'); c && c.click(); openSessions(); }
+      }));
+    },
   });
 }
 

@@ -57,6 +57,30 @@
   </div>
 </section>
 
+<!-- ============ 首次改密（管理员开号后强制） ============ -->
+<section id="view-pass" class="view">
+  <div class="auth-wrap">
+    <div class="brand">
+      <div class="seal">破</div>
+      <h1>初入宗门</h1>
+      <p class="sub">初始口令由管理方发放，须改密后方可入宗</p>
+    </div>
+    <div class="card auth-card">
+      <form id="passForm" autocomplete="on">
+        <label class="field"><span>当前口令</span>
+          <input id="pcOld" type="password" autocomplete="current-password" maxlength="64" placeholder="管理方发放的初始口令" required></label>
+        <label class="field"><span>新口令</span>
+          <input id="pcNew" type="password" autocomplete="new-password" maxlength="64" placeholder="至少 6 位" required></label>
+        <label class="field"><span>再输一次</span>
+          <input id="pcNew2" type="password" autocomplete="new-password" maxlength="64" placeholder="与新口令一致" required></label>
+        <p class="hint" id="passHint">改密后，其他设备上的登录将立即失效。</p>
+        <button type="submit" class="btn primary block" id="btnPass">改 密 入 宗</button>
+      </form>
+      <button class="btn ghost block" id="btnPassOut" style="margin-top:8px">退出登录</button>
+    </div>
+  </div>
+</section>
+
 <!-- ============ 管理台（仅管理员） ============ -->
 <section id="view-admin" class="view">
   <div class="admin-wrap">
@@ -67,9 +91,16 @@
       </div>
       <button class="btn ghost" id="btnAdminBack">返回</button>
     </header>
-    <div class="tabs" id="adminTabs" role="tablist">
-      <button class="tab is-on" data-atab="accounts">账号</button>
+    <div class="tabs scroll-x" id="adminTabs" role="tablist">
+      <button class="tab is-on" data-atab="overview">总览</button>
+      <button class="tab" data-atab="accounts">账号</button>
+      <button class="tab" data-atab="saves">存档</button>
+      <button class="tab" data-atab="players">玩家数据</button>
       <button class="tab" data-atab="codes">兑换码</button>
+      <button class="tab" data-atab="season">赛季</button>
+      <button class="tab" data-atab="switches">开关</button>
+      <button class="tab" data-atab="logs">日志</button>
+      <button class="tab" data-atab="settings">设置</button>
       <button class="tab" data-atab="notice">须知</button>
     </div>
     <div id="adminStage"></div>
@@ -98,6 +129,8 @@
       <button data-speed="5" title="五倍速">五</button>
     </div>
   </header>
+
+  <div class="notice-bar" id="noticeBar" hidden></div>
 
   <nav class="sidenav" id="sidenav">
     <button class="nav-item is-on" data-panel="overview"><i>总</i><span>宗门总览</span></button>
