@@ -3,7 +3,7 @@
  */
 import {
   RESOURCES, RES_BY_KEY, FACILITIES, INSTITUTIONS, LAYERS, REGIONS,
-  MISSION_TEMPLATES, TECHNIQUES, ENDINGS,
+  MISSION_TEMPLATES, TECHNIQUES, ENDINGS, RECRUIT,
 } from './config.js';
 import { STORY_BY_ID, STORY_NODES } from './story.js';
 import { Scene, BUILDINGS } from './scene.js';
@@ -95,6 +95,11 @@ export const UI = {
       });
     });
     document.getElementById('panelBody').addEventListener('click', (e) => this.onClick(e));
+    /* 交互窗口：按下后 1.5 秒内不做自动重排 */
+    const hold = () => { this._interactUntil = Date.now() + 1500; };
+    document.getElementById('panelBody').addEventListener('pointerdown', hold, true);
+    document.getElementById('panelBody').addEventListener('keydown', hold, true);
+    document.getElementById('templeStage').addEventListener('pointerdown', hold, true);
     document.getElementById('templeStage').addEventListener('click', (e) => this.onClick(e));
     document.addEventListener('keydown', (e) => {
       if (e.key === 'Escape') {
@@ -262,6 +267,8 @@ export const UI = {
     const g = this.game;
     const out = [];
     let n = 0;
+    /* 人只站在已开辟的山层上，未开辟的山只留形 */
+    const maxT = Math.max(0, Math.min(9, (g.save.layers || 1) - 1));
     for (const d of g.save.disciples) {
       if (n >= 40) break;
       let t = 5;
@@ -274,7 +281,7 @@ export const UI = {
       else if (d.state === 'bottleneck' || d.demon > 60 || d.step >= 7) { t = 8; kind = 'formal'; }
       else if (d.step >= 5) { t = 4; kind = 'formal'; }
       const u = ((d.id * 37) % 100) / 100;
-      out.push({ t, u: 0.16 + u * 0.68, kind, seed: u * 6.28 });
+      out.push({ t: Math.min(t, maxT), u: 0.16 + u * 0.68, kind, seed: u * 6.28 });
       n++;
     }
     if (!out.length) {
@@ -314,12 +321,16 @@ export const UI = {
   /* ---------- 顶栏 ---------- */
   renderTop() {
     const g = this.game; const s = g.save;
+    const speed = s.sect.speed;
+    const sig = [s.sect.name, s.sect.founder, Math.floor(s.day / 360), fmt(g.renown), fmt(s.res.lingshi || 0), speed].join('|');
+    if (sig === this._topSig) return;
+    this._topSig = sig;
     document.getElementById('hSect').textContent = s.sect.name;
     document.getElementById('hFounder').textContent = '祖师 · ' + s.sect.founder;
     document.getElementById('hYear').textContent = Math.floor(s.day / 360) + 1;
     document.getElementById('hRenown').textContent = fmt(g.renown);
     document.getElementById('hStone').textContent = fmt(s.res.lingshi || 0);
-    document.querySelectorAll('#speedBox button').forEach((b) => b.classList.toggle('on', Number(b.dataset.speed) === s.sect.speed));
+    document.querySelectorAll('#speedBox button').forEach((b) => b.classList.toggle('on', Number(b.dataset.speed) === speed));
   },
 
   render() {
@@ -330,7 +341,7 @@ export const UI = {
     if (document.getElementById('view-temple').classList.contains('is-active')) this.renderTemple();
   },
 
-  renderPanel() {
+  renderPanel(force) {
     const body = document.getElementById('panelBody');
     if (!body || !this.game) return;
     const map = {
@@ -339,7 +350,15 @@ export const UI = {
       rank: () => this.pRank(), chronicle: () => this.pChronicle(), settings: () => this.pSettings(),
       pending: () => this.pPending(), messages: () => this.pMessages(), autonomy: () => this.pAutonomy(),
     };
-    body.innerHTML = (map[this.panel] || map.pending)();
+    /* 手指/鼠标还按在抽屉里时不重排，否则点击目标会被销毁，点了等于没点 */
+    if (!force && Date.now() < (this._interactUntil || 0)) return;
+    const html = (map[this.panel] || map.pending)();
+    /* 内容一模一样就不动 DOM：省掉每秒一次的大树重建与滚动跳动 */
+    if (!force && html === this._panelHtml) return;
+    this._panelHtml = html;
+    const top = body.scrollTop;
+    body.innerHTML = html;
+    if (top) body.scrollTop = top;
   },
 
   isLive() {
@@ -357,11 +376,12 @@ export const UI = {
     document.querySelectorAll('.rail-item[data-panel]').forEach((b) => b.classList.toggle('is-on', b.dataset.panel === name));
     document.getElementById('panelTitle').textContent = meta[0];
     document.getElementById('panelSub').textContent = meta[1];
-    this.renderPanel();
+    this._panelHtml = '';
+    this.renderPanel(true);
     document.getElementById('panelBody').scrollTop = 0;
     document.getElementById('view-game').classList.add('panel-open');
     document.getElementById('panel').setAttribute('aria-hidden', 'false');
-    if (this.scene) this.scene.clearSelection();
+    if (this.scene) { this.scene.clearSelection(); this.scene.pause(); }
     this.closeRail();
     if (name === 'messages') this.markNewsSeen();
     this.syncBadges(this._matters || []);
@@ -372,6 +392,7 @@ export const UI = {
     document.querySelectorAll('.rail-item[data-panel]').forEach((b) => b.classList.toggle('is-on', b.dataset.panel === 'scene'));
     document.getElementById('view-game').classList.remove('panel-open');
     document.getElementById('panel').setAttribute('aria-hidden', 'true');
+    if (this.scene) { this.scene.resize(); this.scene.resume(); }
     const hint = document.getElementById('sceneHint');
     if (hint) { hint.textContent = '选一处建筑，再点一次进入'; hint.classList.remove('off'); }
   },
@@ -562,6 +583,7 @@ export const UI = {
   /* ---------- 祖师殿 ---------- */
   openTemple() {
     this.closePanel();
+    if (this.scene) this.scene.pause();
     document.querySelectorAll('.rail-item[data-panel]').forEach((b) => b.classList.toggle('is-on', b.dataset.panel === 'temple'));
     document.getElementById('templeSect').textContent = this.game.save.sect.name;
     document.querySelectorAll('#templeTabs .tab').forEach((x) => x.classList.toggle('is-on', x.dataset.ttab === this.templeTab));
@@ -574,7 +596,7 @@ export const UI = {
     document.querySelectorAll('.view').forEach((v) => v.classList.toggle('is-active', v.id === 'view-game'));
     this.panel = 'scene';
     document.querySelectorAll('.rail-item[data-panel]').forEach((b) => b.classList.toggle('is-on', b.dataset.panel === 'scene'));
-    if (this.scene) { this.scene.resize(); this.syncScene(); }
+    if (this.scene) { this.scene.resize(); this.syncScene(); this.scene.resume(); }
   },
 
   renderTemple() {
@@ -597,12 +619,12 @@ export const UI = {
       </div>`;
     }
     return list.map((m, i) => {
-      const current = i === 0;
-      return `<article class="memo" data-memo="${esc(m.ref)}">
+      const first = i === 0;
+      return `<article class="memo ${first ? 'is-first' : ''}" data-memo="${esc(m.ref)}">
         <header class="memo-head">
           <span class="memo-seal">${esc(m.seal || '奏')}</span>
           <div class="m-h"><strong>${esc(m.title)}</strong><span>${esc(m.from || '')}</span></div>
-          <span class="pill ${current ? '' : 'mute'}">${current ? '待批' : '候批'}</span>
+          <span class="pill ${first ? '' : 'mute'}">待批</span>
         </header>
         <div class="memo-body">
           <div class="memo-sec">
@@ -617,17 +639,17 @@ export const UI = {
             <div class="s-t">三处置</div>
             <div class="memo-opts">
               ${m.options.map((o, k) => `
-                <button class="memo-opt" data-act="memo:pick" data-arg="${esc(m.ref)}|${k}" ${(!current || o.disabled) ? 'disabled' : ''}>
-                  <span class="o-label">${esc(o.label)}</span>
+                <button class="memo-opt ${o.disabled ? 'is-off' : ''}" data-act="memo:pick" data-arg="${esc(m.ref)}|${k}" ${o.disabled ? 'disabled' : ''}>
+                  <span class="o-label">${esc(o.label)}${o.disabled ? '<em class="o-off">存量不足</em>' : ''}</span>
                   <span class="o-eff">${esc(o.detail || '')}</span>
                 </button>`).join('')}
             </div>
           </div>
         </div>
-        <div class="memo-note">附注：${esc(m.note || '')}${current ? '' : '　· 请先批阅前一件'}</div>
+        <div class="memo-note">附注：${esc(m.note || '')}</div>
       </article>`;
     }).join('') + `<div class="memo-queue">
-      <b>依次批阅</b><span>批复一件后，下一件自动陈上；批语与后果即时写入宗门史。</span>
+      <b>逐件批阅</b><span>点任一处置即为批复一件，其余仍留在案上；批语与后果即时写入宗门史。</span>
     </div>`;
   },
 
@@ -708,12 +730,8 @@ export const UI = {
   /* ---------- 弟子 ---------- */
   pDisciples() {
     const g = this.game;
-    let list = g.save.disciples.slice();
+    const s = g.save;
     const f = this.discFilter;
-    if (f.type === 'formal') list = list.filter((d) => d.type === 'formal');
-    if (f.type === 'servant') list = list.filter((d) => d.type === 'servant');
-    if (f.type === 'staff') list = list.filter((d) => d.type === 'staff');
-    if (f.type === 'break') list = list.filter((d) => d.state === 'bottleneck');
     const sorters = {
       power: (a, b) => g.power(b) - g.power(a),
       step: (a, b) => (b.step || 0) - (a.step || 0) || b.star - a.star,
@@ -721,21 +739,77 @@ export const UI = {
       join: (a, b) => b.joinedDay - a.joinedDay,
       demon: (a, b) => b.demon - a.demon,
     };
-    list.sort(sorters[f.sort] || sorters.power);
+    const cmp = sorters[f.sort] || sorters.power;
+    const cap = g.cap();
+    const total = s.disciples.length;
+    const formal = s.disciples.filter((d) => d.type === 'formal').sort(cmp);
+    const servant = s.disciples.filter((d) => d.type === 'servant').sort(cmp);
+    const staff = s.disciples.filter((d) => d.type === 'staff').sort(cmp);
+    const broken = s.disciples.filter((d) => d.state === 'bottleneck');
 
+    const afford = (cost) => Object.entries(cost).every(([k, v]) => (s.res[k] || 0) >= v);
+    const costTxt = (cost) => Object.entries(cost).map(([k, v]) => `${(RES_BY_KEY[k] || {}).name || k} ${v}`).join(' · ');
+
+    const recBtn = (key) => {
+      const r = RECRUIT[key];
+      const full = total >= cap;
+      const poor = !afford(r.cost);
+      const off = full || poor;
+      const why = full ? `已满 ${cap} 人，先开辟更高层` : poor ? `缺 ${costTxt(r.cost)}` : '';
+      return `<div class="rec">
+        <div class="rec-top"><b>${r.name}</b><span class="rec-cost">${costTxt(r.cost)}</span></div>
+        <p class="rec-desc">${r.desc}</p>
+        <button class="btn sm ${key === 'formal' ? 'primary' : ''}" data-act="recruit" data-arg="${key}" ${off ? 'disabled' : ''}>
+          ${off ? why : `招一名${r.name}`}
+        </button>
+      </div>`;
+    };
+
+    const group = (title, list, note) => {
+      if (!list.length) return '';
+      return `<div class="disc-group">
+        <div class="dg-head"><b>${title}</b><span>${list.length} 人</span><em>${note}</em></div>
+        <div class="dg-body">${list.slice(0, 60).map((d) => this.discCard(d)).join('')}</div>
+      </div>`;
+    };
+
+    const filtered = (list) => (list.length
+      ? `<div class="stack">${list.slice(0, 60).map((d) => this.discCard(d)).join('')}</div>`
+      : '<div class="card empty"><strong>此处无人</strong>换个筛选项看看。</div>');
+
+    let body;
+    if (f.type === 'all') {
+      body = group('正式弟子', formal, '修炼、出战、转职')
+        + group('杂役', servant, '跑腿、守门，占口粮')
+        + group('已转职', staff, '在机构当值')
+        || '<div class="card empty"><strong>还没有人</strong>先在山门收第一批。</div>';
+    } else if (f.type === 'break') body = filtered(broken);
+    else if (f.type === 'formal') body = filtered(formal);
+    else if (f.type === 'servant') body = filtered(servant);
+    else body = filtered(staff);
+
+    const examPool = formal.filter((d) => d.step === 3 && d.state === 'bottleneck' && d.tries3 < 3);
     return `<div class="stack">
+      <div class="card recruit-card">
+        <div class="card-head">
+          <div class="t"><h3>招收入门</h3><small>在册 ${total} / ${cap} 人</small></div>
+          ${examPool.length ? `<button class="btn sm ghost" data-act="exam">第三步选拔 · ${examPool.length} 人</button>` : ''}
+        </div>
+        <div class="rec-grid">${recBtn('formal')}${recBtn('servant')}</div>
+        <div class="cap-bar"><i style="width:${Math.min(100, (total / cap) * 100)}%"></i></div>
+      </div>
+
       <div class="card tight">
         <div class="row" style="flex-wrap:wrap">
           ${[['all', '全部'], ['formal', '正式'], ['servant', '杂役'], ['staff', '已转职'], ['break', '待突破']]
-        .map(([k, n]) => `<button class="btn sm ${f.type === k ? 'primary' : ''}" data-act="filter" data-arg="type:${k}">${n}</button>`).join('')}
+        .map(([k, n]) => `<button class="btn sm ${f.type === k ? 'primary' : ''}" data-act="filter" data-arg="type:${k}">${n}${k === 'break' && broken.length ? ` ${broken.length}` : ''}</button>`).join('')}
         </div>
         <div class="row" style="flex-wrap:wrap;margin-top:8px">
           ${[['power', '战力'], ['step', '步数'], ['life', '寿元'], ['demon', '心魔'], ['join', '入门']]
         .map(([k, n]) => `<button class="btn sm ${f.sort === k ? 'ghost' : ''}" data-act="filter" data-arg="sort:${k}">${n}</button>`).join('')}
         </div>
       </div>
-      ${list.length ? list.slice(0, 60).map((d) => this.discCard(d)).join('') : '<div class="card empty"><strong>还没有弟子</strong>去山门收第一批人吧。</div>'}
-      ${list.length > 60 ? `<p class="hint center">仅显示前 60 人</p>` : ''}
+      ${body}
     </div>`;
   },
 
@@ -1263,16 +1337,26 @@ export const UI = {
     const m = list.find((x) => x.ref === ref);
     if (!m) return;
     const opt = m.options[idx];
-    if (!opt || opt.disabled) return;
-    const res = opt.run() || {};
-    if (!res.ok) { this.toast(res.msg || '未能施行'); return; }
+    if (!opt) return;
+    if (opt.disabled) { this.toast('此策存量不足，换一条'); return; }
+    let res = {};
+    try {
+      res = opt.run() || {};
+    } catch (err) {
+      this.toast('批复未能施行：' + (err && err.message ? err.message : '未知错误'));
+      return;
+    }
+    if (res.ok === false) { this.toast(res.msg || '未能施行'); return; }
     this.game.chronicle('memorial', m.title, opt.label, res.msg || opt.detail || '');
     this.game.msg(`批复：${m.title} · ${opt.label}`, 'story');
-    this.game.matterState && (this.game.matterState.seen[ref] = this.game.save.day);
+    const ms = this.game.save.matterState;
+    if (ms) ms.seen[ref] = this.game.save.day;
     if (this.helpers.matterAct) this.helpers.matterAct(ref, 'approve', opt.label);
-    this.toast(res.msg || '已批复');
+    const left = memorials(this.game).length;
+    this.toast(`${res.msg || '已批复'}${left ? ` · 案上还有 ${left} 件` : ' · 案上已空'}`);
     this.helpers.autoSave && this.helpers.autoSave();
     this.syncScene();
+    this.syncBadges(this._matters || []);
     if (res.nav) { this.backToScene(); this.setPanel(res.nav); return; }
     this.renderTemple();
   },

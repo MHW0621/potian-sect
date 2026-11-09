@@ -266,3 +266,10 @@ export const NAMED_BACKGROUNDS = [
   { key: 'chuming', name: '旧宗除名', tag: '际遇', desc: '被逐出过一次山门，不愿提为什么' },
   { key: 'mimi', name: '带着秘密来投', tag: '际遇', desc: '包袱里有个从不打开的木匣' },
 ];
+
+/* ---------- 招收 ---------- */
+/* 招收成本与结果，前后端共用一份，避免各处各写一套 */
+export const RECRUIT = {
+  servant: { name: '杂役', cost: { liangshi: 60 }, desc: '做粗活、跑腿、守山门；不占修炼位，也不出战' },
+  formal: { name: '正式弟子', cost: { lingshi: 260, liangshi: 80 }, desc: '查验根骨后入门，可修炼、可出战、可转职' },
+};

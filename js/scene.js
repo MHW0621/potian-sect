@@ -65,6 +65,8 @@ export class Scene {
     this.onDowngrade = null;
     this._bound = false;
     this._dirty = true;
+    this.paused = false;
+    this._drawAt = 0;
   }
 
   mount() {
@@ -72,6 +74,10 @@ export class Scene {
     this._bound = true;
     this._ro = new ResizeObserver(() => this.resize());
     this._ro.observe(this.canvas.parentElement);
+    document.addEventListener('visibilitychange', () => {
+      if (document.hidden) { cancelAnimationFrame(this._raf); this._raf = 0; }
+      else if (!this.paused) { this._drawAt = 0; this.play(); }
+    });
     this.resize();
     this.buildOverlay();
     this.positionHotspots();
@@ -163,9 +169,9 @@ export class Scene {
     for (const b of BUILDINGS) {
       const lv = b.layer ? levels[b.layer - 1] : null;
       const half = lv ? (b.u < 0 ? lv.hl : lv.hr) : groundHalf;
-      const sc = clamp((lv ? Math.min(lv.hl, lv.hr) : baseHalf) / 250, 0.55, 1.25);
-      const w = b.w * sc * 1.04;
-      const h = b.h * sc * 1.04;
+      const sc = clamp((lv ? Math.min(lv.hl, lv.hr) : baseHalf) / 250, 0.6, 1.18);
+      const w = b.w * sc * 1.34;
+      const h = b.h * sc * 1.34;
       let x = cx + b.u * half;
       /* 山脚建筑贴边时要收进来，竖屏也不出画 */
       if (!b.layer) {
@@ -225,6 +231,11 @@ export class Scene {
     }
   }
 
+  locked(key) {
+    const b = BUILDINGS.find((x) => x.key === key);
+    return !!b && b.layer > 0 && b.layer > (this.model.layers || 1);
+  }
+
   updateBadges() {
     const badges = this.model.badges || {};
     for (const b of BUILDINGS) {
@@ -233,6 +244,10 @@ export class Scene {
       const bd = badges[b.key];
       const locked = b.layer > 0 && b.layer > (this.model.layers || 1);
       el.classList.toggle('is-locked', locked);
+      el.style.display = locked ? 'none' : '';
+      el.tabIndex = locked ? -1 : 0;
+      if (locked) el.setAttribute('aria-hidden', 'true');
+      else el.removeAttribute('aria-hidden');
       el.classList.toggle('lv1', !!bd && bd.level === 1);
       el.classList.toggle('lv2', !!bd && bd.level === 2);
       el.classList.toggle('lv3', !!bd && bd.level === 3);
@@ -286,15 +301,37 @@ export class Scene {
   /* ---------- 循环 ---------- */
   play() {
     cancelAnimationFrame(this._raf);
+    this._raf = 0;
     if (!this.motion) { this.frame(0, true); return; }
+    if (this.paused || document.hidden) return;
     const step = (ts) => {
       this._raf = requestAnimationFrame(step);
-      const dt = Math.min(64, ts - (this._last || ts));
-      this._last = ts;
+      if (this.paused || document.hidden) return;
+      /* 限帧：场景是静态水墨底 + 几处缓动，30 帧已够，省一半合成开销 */
+      const gap = ts - (this._drawAt || 0);
+      if (gap < 1000 / 30) return;
+      const dt = Math.min(96, gap);
+      this._drawAt = ts;
       this.frame(dt / 1000, false);
       this.monitor(dt);
     };
     this._raf = requestAnimationFrame(step);
+  }
+
+  /* 抽屉打开、切到祖师殿、页面隐藏时停掉绘制 */
+  pause() {
+    if (this.paused) return;
+    this.paused = true;
+    cancelAnimationFrame(this._raf);
+    this._raf = 0;
+  }
+
+  resume() {
+    if (!this.paused) return;
+    this.paused = false;
+    this._drawAt = 0;
+    this._last = 0;
+    this.play();
   }
 
   monitor(dt) {
@@ -340,7 +377,9 @@ export class Scene {
     this.paintFarPeaks(g);
     this.paintMountain(g);
     this.paintFoot(g);
-    for (const b of BUILDINGS) this.paintBuilding(g, b);
+    for (const b of BUILDINGS) {
+      if (!b.layer || b.layer <= (this.model ? (this.model.layers || 1) : 1)) this.paintBuilding(g, b);
+    }
     this.paintFog(g);
     this._bg = c;
   }
@@ -361,11 +400,12 @@ export class Scene {
     halo.addColorStop(1, 'rgba(255,250,236,0)');
     g.fillStyle = halo;
     g.beginPath(); g.arc(mx, my, mr * 4.2, 0, TAU); g.fill();
-    g.fillStyle = 'rgba(253,249,238,.98)';
+    const disc = g.createRadialGradient(mx, my, mr * 0.2, mx, my, mr);
+    disc.addColorStop(0, 'rgba(255,252,244,.92)');
+    disc.addColorStop(0.72, 'rgba(253,246,232,.62)');
+    disc.addColorStop(1, 'rgba(251,242,226,0)');
+    g.fillStyle = disc;
     g.beginPath(); g.arc(mx, my, mr, 0, TAU); g.fill();
-    g.strokeStyle = 'rgba(168,134,63,.2)';
-    g.lineWidth = 1;
-    g.beginPath(); g.arc(mx, my, mr + 5, 0, TAU); g.stroke();
   }
 
   paintFarPeaks(g) {
@@ -484,10 +524,10 @@ export class Scene {
     for (let k = 0; k < 26; k++) {
       const t = rand();
       const y0 = L.baseY + step * 0.5 - t * spanY;
-      const len = 60 + rand() * 240;
+      const len = 40 + rand() * 150;
       const x = cx + (rand() - 0.5) * mw(t) * 2.1;
       const w = 5 + rand() * 16;
-      const a = 0.05 + rand() * 0.1;
+      const a = 0.03 + rand() * 0.05;
       const gr = g.createLinearGradient(x, y0, x, y0 - len);
       gr.addColorStop(0, `rgba(76,59,40,${a})`);
       gr.addColorStop(0.6, `rgba(76,59,40,${a * 0.5})`);
@@ -567,8 +607,9 @@ export class Scene {
     g.stroke();
     g.restore();
 
-    /* 台地：凿进山腹的一级级石台 */
-    for (let i = 0; i < 10; i++) {
+    /* 台地：只画已开辟的层。未开辟的山体只留形，不凿台，免得叠出一排白条 */
+    const shown = Math.max(1, Math.min(10, this.model.layers || 1));
+    for (let i = 0; i < shown; i++) {
       const l = lv[i];
       const yt = l.y - lift;
       const hw = 5 + (i % 4);
@@ -588,11 +629,11 @@ export class Scene {
 
       /* 台面：靠两端淡出，像凿进岩体而不是架空一条板 */
       const top = g.createLinearGradient(leftX, 0, rightX, 0);
-      top.addColorStop(0, 'rgba(230,216,190,.35)');
-      top.addColorStop(0.12, 'rgba(238,228,206,.88)');
-      top.addColorStop(0.5, 'rgba(228,214,188,.9)');
-      top.addColorStop(0.88, 'rgba(238,228,206,.88)');
-      top.addColorStop(1, 'rgba(230,216,190,.35)');
+      top.addColorStop(0, 'rgba(186,166,134,0)');
+      top.addColorStop(0.12, 'rgba(202,183,150,.72)');
+      top.addColorStop(0.5, 'rgba(193,173,140,.78)');
+      top.addColorStop(0.88, 'rgba(202,183,150,.72)');
+      top.addColorStop(1, 'rgba(186,166,134,0)');
       g.fillStyle = top;
       g.beginPath();
       g.moveTo(edge[0][0], edge[0][1]);
@@ -601,6 +642,19 @@ export class Scene {
       g.lineTo(leftX + 2, yt + 1);
       g.closePath();
       g.fill();
+
+      /* 口沿高光：只 2px，交代石台的厚度 */
+      const lipHi = g.createLinearGradient(leftX, 0, rightX, 0);
+      lipHi.addColorStop(0, 'rgba(250,242,224,0)');
+      lipHi.addColorStop(0.2, 'rgba(250,242,224,.5)');
+      lipHi.addColorStop(0.8, 'rgba(250,242,224,.5)');
+      lipHi.addColorStop(1, 'rgba(250,242,224,0)');
+      g.strokeStyle = lipHi;
+      g.lineWidth = 1.6;
+      g.beginPath();
+      g.moveTo(edge[0][0], edge[0][1] + 1.4);
+      for (let k = 1; k <= np; k++) g.lineTo(edge[k][0], edge[k][1] + 1.4);
+      g.stroke();
 
       /* 台沿墨线：中段实、两端虚 */
       const lip = g.createLinearGradient(leftX, 0, rightX, 0);
@@ -652,6 +706,19 @@ export class Scene {
         }
       }
     }
+
+    /* 未开辟的层：只留一道极淡的凿痕线，保留十层的结构暗示 */
+    g.save();
+    for (let i = shown; i < 10; i++) {
+      const l = lv[i];
+      g.strokeStyle = 'rgba(96,78,54,.10)';
+      g.lineWidth = 1;
+      g.beginPath();
+      g.moveTo(cx - l.hl + 6, l.y - lift);
+      g.quadraticCurveTo(cx, l.y - lift + 3, cx + l.hr - 6, l.y - lift);
+      g.stroke();
+    }
+    g.restore();
 
     /* 坡面散树：只在高档位，补空山 */
     if (QUALITY[this.q].detail) {
@@ -1175,26 +1242,18 @@ export class Scene {
     }
   }
 
-  /* 未解锁层：薄雾与虚化，不整体涂白 */
+  /* 未开辟的山：整片淡墨压过去，只压一层，不逐级刷白条 */
   paintFog(g) {
     const layers = this.model.layers || 1;
+    if (layers >= 10) return;
     const { L } = this;
-    for (let i = 0; i < 10; i++) {
-      if (i < layers) continue;
-      const lv = L.levels[i];
-      const grd = g.createLinearGradient(0, lv.y - L.step, 0, lv.y + 6);
-      grd.addColorStop(0, 'rgba(250,246,236,.72)');
-      grd.addColorStop(0.7, 'rgba(248,242,230,.55)');
-      grd.addColorStop(1, 'rgba(246,240,226,.2)');
-      g.fillStyle = grd;
-      g.beginPath();
-      g.moveTo(L.cx - lv.hl - 8, lv.y + 4);
-      g.lineTo(L.cx + lv.hr + 8, lv.y + 4);
-      g.lineTo(L.cx + (L.levels[i + 1] ? L.levels[i + 1].hr : 0) + 8, lv.y - L.step + 2);
-      g.lineTo(L.cx - (L.levels[i + 1] ? L.levels[i + 1].hl : 0) - 8, lv.y - L.step + 2);
-      g.closePath();
-      g.fill();
-    }
+    const top = L.levels[Math.min(9, layers)] ? L.levels[Math.min(9, layers)].y : L.peakY;
+    const grd = g.createLinearGradient(0, L.peakY - 20, 0, top + 10);
+    grd.addColorStop(0, 'rgba(247,241,229,.46)');
+    grd.addColorStop(0.62, 'rgba(246,239,226,.30)');
+    grd.addColorStop(1, 'rgba(244,236,221,0)');
+    g.fillStyle = grd;
+    g.fillRect(-20, L.peakY - 40, this.W + 40, top - L.peakY + 60);
   }
 
   /* ---------- 逐帧动画层 ---------- */
@@ -1252,7 +1311,7 @@ export class Scene {
 
   drawFigure(g, x, y, f, t) {
     const s = clamp(this.L.baseHalf / 320, 0.85, 1.3);
-    const h = (f.kind === 'formal' ? 15 : 12.5) * s;
+    const h = (f.kind === 'formal' ? 17 : 14) * s;
     const robe = {
       formal: '#5d757e',
       servant: '#8a6f4c',
@@ -1309,7 +1368,7 @@ export class Scene {
     const pulse = this.motion ? 0.72 + Math.sin(this.t * 2.2) * 0.28 : 1;
     for (const key of Object.keys(badges)) {
       const p = this.pos[key];
-      if (!p) continue;
+      if (!p || this.locked(key)) continue;
       const level = badges[key].level;
       const col = level === 3 ? '157,43,34' : level === 2 ? '168,134,63' : '71,105,90';
       const r = Math.max(p.w, p.h) * (level === 3 ? 1.1 : 0.98);
@@ -1329,7 +1388,7 @@ export class Scene {
     const key = this.hovered || this.selected;
     if (!key) return;
     const p = this.pos[key];
-    if (!p) return;
+    if (!p || this.locked(key)) return;
     const active = this.selected === key;
     g.strokeStyle = active ? 'rgba(157,43,34,.9)' : 'rgba(90,80,64,.45)';
     g.lineWidth = active ? 1.8 : 1.1;

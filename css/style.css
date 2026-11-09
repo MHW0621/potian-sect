@@ -432,7 +432,9 @@ textarea:focus { outline: none; border-color: var(--jade); box-shadow: 0 0 0 3px
  * ========================================================= */
 
 /* ---------- 游戏容器：场景为常驻底层 ---------- */
-#view-game {
+/* 注意：display 必须挂在 .is-active 上，否则 id 选择器会压过 .view{display:none}，
+   切到祖师殿时游戏页不隐藏，祖师殿被顶到首屏之外，表现为「点了没反应」 */
+#view-game.is-active {
   height: 100vh; height: 100dvh; overflow: hidden;
   display: flex; flex-direction: column;
 }
@@ -676,14 +678,14 @@ textarea:focus { outline: none; border-color: var(--jade); box-shadow: 0 0 0 3px
 .memo-sec .s-c.warn { color: #8a5a1f; }
 .memo-opts { display: grid; gap: 8px; margin: 4px 0 12px; }
 .memo-opt {
-  display: block; width: 100%; text-align: left; padding: 10px 13px;
+  display: block; width: 100%; text-align: left; padding: 12px 14px;
   border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 253, 248, .9);
   transition: .14s;
 }
 .memo-opt:hover { border-color: var(--seal); background: #fffdf8; }
 .memo-opt:disabled { opacity: .45; }
-.memo-opt .o-label { font-size: 13.5px; color: var(--ink); font-family: var(--f-head); letter-spacing: .04em; }
-.memo-opt .o-eff { font-size: 11px; color: var(--ink-3); margin-top: 3px; line-height: 1.6; }
+.memo-opt .o-label { display: block; font-size: 13.5px; color: var(--ink); font-family: var(--f-head); letter-spacing: .04em; line-height: 1.5; }
+.memo-opt .o-eff { display: block; font-size: 11.5px; color: var(--ink-3); margin-top: 4px; line-height: 1.65; }
 .memo-note { padding: 9px 16px 12px; font-size: 11px; color: var(--ink-3); background: rgba(29, 27, 24, .02); border-top: 1px dashed var(--line); }
 .memo-queue {
   display: flex; align-items: center; gap: 8px; padding: 10px 14px; margin-top: 10px;
@@ -829,3 +831,61 @@ textarea:focus { outline: none; border-color: var(--jade); box-shadow: 0 0 0 3px
 .board-count { margin-left: auto; font-size: 11.5px; color: var(--ink-3); }
 .board-card.is-locked { opacity: .5; }
 .board-card.is-locked .bc-note { color: var(--ink-4); }
+
+/* ---------- 招收入门 ---------- */
+.recruit-card { padding-bottom: 16px; }
+.rec-grid { display: grid; gap: 12px; grid-template-columns: 1fr 1fr; margin-top: 4px; }
+.rec {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 14px 14px 14px; border-radius: 10px;
+  border: 1px solid rgba(120, 102, 76, .18);
+  background: rgba(255, 252, 245, .66);
+}
+.rec-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.rec-top b { font-size: 14px; color: var(--ink); font-family: var(--f-head); letter-spacing: .04em; }
+.rec-cost {
+  font-size: 11.5px; color: var(--ink-4);
+  font-variant-numeric: tabular-nums; white-space: nowrap;
+}
+.rec-desc { margin: 0; font-size: 11.5px; line-height: 1.6; color: var(--ink-4); }
+.rec .btn { width: 100%; margin-top: auto; }
+.rec .btn[disabled] { cursor: not-allowed; opacity: .62; }
+.cap-bar {
+  margin-top: 12px; height: 3px; border-radius: 2px; overflow: hidden;
+  background: rgba(120, 102, 76, .14);
+}
+.cap-bar i { display: block; height: 100%; background: var(--jade); transition: width .3s ease; }
+
+/* ---------- 弟子分组 ---------- */
+.disc-group { display: flex; flex-direction: column; gap: 10px; }
+.dg-head {
+  display: flex; align-items: baseline; gap: 8px;
+  padding: 2px 2px 8px; border-bottom: 1px solid rgba(120, 102, 76, .16);
+}
+.dg-head b { font-size: 13.5px; font-family: var(--f-head); color: var(--ink); letter-spacing: .06em; }
+.dg-head span { font-size: 11.5px; color: var(--ink-3); font-variant-numeric: tabular-nums; }
+.dg-head em { margin-left: auto; font-style: normal; font-size: 11.5px; color: var(--ink-4); }
+.dg-body { display: flex; flex-direction: column; gap: 10px; }
+
+/* ---------- 奏疏选项状态 ---------- */
+.memo-opt.is-off { cursor: not-allowed; opacity: .55; }
+.memo-opt.is-off:hover { border-color: rgba(120, 102, 76, .26); background: rgba(255, 252, 245, .9); }
+.o-off {
+  margin-left: 8px; font-style: normal; font-size: 10.5px;
+  padding: 1px 5px; border-radius: 4px;
+  color: var(--seal); background: rgba(157, 43, 34, .09);
+}
+.memo.is-first { border-color: rgba(157, 43, 34, .28); }
+
+@media (max-width: 640px) {
+  .rec-grid { grid-template-columns: 1fr; }
+}
+
+/* ---------- 弟子卡读数排版 ---------- */
+.disc-card { gap: 10px; }
+.disc-card .kv { font-size: 11.5px; gap: 4px 0; }
+.disc-card .kv > span { display: inline-flex; align-items: baseline; }
+.disc-card .kv > span + span::before {
+  content: "·"; margin: 0 8px; color: var(--ink-4); font-weight: 400;
+}
+.disc-card .bar { height: 6px; }

@@ -1,7 +1,7 @@
 /* 破天宗 · 启动与编排 */
 import { Game, migrate } from './engine.js';
 import { UI } from './ui.js';
-import { TICK_MS, DAYS_PER_TICK, OFFLINE_CAP_DAYS, RANDOM_EVENTS, FLAGS, resolveFlag } from './config.js';
+import { TICK_MS, DAYS_PER_TICK, OFFLINE_CAP_DAYS, RANDOM_EVENTS, FLAGS, resolveFlag, RECRUIT } from './config.js';
 import { STORY_BY_ID } from './story.js';
 import { deriveMatters } from './matters.js';
 import * as cloud from './cloud.js';
@@ -508,21 +508,22 @@ function bindGameChromeOnce() {
 function recruit(kind) {
   const g = state.game;
   if (!g) return;
-  const cap = 6 + g.save.layers * 4;
+  const def = RECRUIT[kind] || RECRUIT.formal;
+  const cap = g.cap();
   if (g.save.disciples.length >= cap) return toast(`小世界仅能容纳 ${cap} 人，先开辟更高层`);
-  if (kind === 'servant') {
-    if (g.save.res.liangshi < 60) return toast('粮食不足');
-    g.addRes({ liangshi: -60 });
-    const d = g.addDisciple('servant');
-    UI.pushMsg(`${d.name} 入宗为杂役。`, 'info');
-  } else {
-    if (g.save.res.lingshi < 260) return toast('灵石不足');
-    if (g.save.res.liangshi < 80) return toast('粮食不足');
-    g.addRes({ lingshi: -260, liangshi: -80 });
-    const d = g.addDisciple(Math.random() < 0.12 ? 'genius' : 'formal');
-    UI.pushMsg(`${d.name} 通过查验，入宗为正式弟子。`, 'good');
+  for (const [k, v] of Object.entries(def.cost)) {
+    if ((g.save.res[k] || 0) < v) return toast(`${{ lingshi: '灵石', liangshi: '粮食' }[k] || k}不足，需 ${v}`);
   }
-  UI.render();
+  g.addRes(Object.fromEntries(Object.entries(def.cost).map(([k, v]) => [k, -v])));
+  const d = g.addDisciple(kind === 'servant' ? 'servant' : (Math.random() < 0.12 ? 'genius' : 'formal'));
+  if (!d) {
+    /* 兜底：人数已满时把消耗退回去，不留半截状态 */
+    g.addRes(def.cost);
+    return toast('山门已满，未能入门');
+  }
+  UI.pushMsg(kind === 'servant' ? `${d.name} 入宗为杂役。` : `${d.name} 通过查验，入宗为正式弟子。`, kind === 'servant' ? 'info' : 'good');
+  UI.syncScene();
+  UI.renderPanel(true);
   state.dirty = true;
   autoSave();
 }
