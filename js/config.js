@@ -33,11 +33,19 @@ export function resolveFlag(spec, account) {
   return hashBucket(uid) < pct;
 }
 
-/* 时间：1 倍速下每 TICK_MS 毫秒推进 DAYS_PER_TICK 个游戏日 */
+/* 时间：1 倍速下每 TICK_MS 毫秒推进 DAYS_PER_TICK 个游戏日
+ *
+ * 旧值 1.5 表示每秒六个游戏日 —— 一年 360 天只跑六十秒。
+ * 掌门一天要被问几十件事，全是秒回秒结，界面数字一直在跳，
+ * 看起来就像卡。真实宗门不是这个节奏：文牍要流转，结案有日子。
+ * 现在 1 倍速是每秒半个游戏日，一年约十二分钟；嫌慢有 2x / 4x。
+ */
 export const TICK_MS = 250;
-export const DAYS_PER_TICK = 1.5;
-export const SPEEDS = [0, 1, 2, 5];
+export const DAYS_PER_TICK = 0.125;
+export const SPEEDS = [0, 1, 2, 4];
 export const OFFLINE_CAP_DAYS = 2400;
+/* 一年多少日：UI 用得到，别再各处硬写 360 */
+export const DAYS_PER_YEAR = 360;
 
 /* ---------- 二十阶境界 ---------- */
 export const REALMS = [
@@ -317,6 +325,31 @@ export const HEIR = {
 /* ---------- 弟子阁 ----------
  * 阁老席位随山门层数开；人不够时按阶梯降格任职，绝不空转。
  */
+/* ---------- 文牍与在办 ----------
+ *
+ * 真实宗门的掌门不是"点一下立刻生效"的许愿机：
+ * 旨意要交到当值阁老手上，承办有工期，办完才有回话。
+ * 阁中同时能推的事有人手上限，超出的只能排在后面 —— 这就是积压。
+ *
+ * 积压不是惩罚，是提示：该提拔执事了，或者该少管些闲事。
+ */
+export const ORDERS = {
+  kinds: {
+    enshrine: { days: 10, title: '册封礼', area: 'seat', need: 1 },
+    build:    { days: 24, title: '营建',   area: 'build', need: 2 },
+    convert:  { days: 6,  title: '转职',   area: 'turn', need: 1 },
+    recruit:  { days: 15, title: '开山收徒', area: 'recruit', need: 2 },
+  },
+  /* 阁中并行办几件：底数 + 每名阁老 */
+  base: 2,
+  perElder: 1,
+  max: 14,
+  /* 每积压一件，工期顺延几日 */
+  backlogDelay: 2,
+  /* 积压到几件开始提醒 */
+  warn: 3,
+};
+
 export const ELDER = {
   base: 3,
   perLayers: 2,          // 每开 2 层加 1 席

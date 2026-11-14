@@ -6,8 +6,7 @@ import {
   TECHNIQUES, TECH_BY_KEY, RESOURCES, RES_BY_KEY, FACILITIES, INSTITUTIONS, LAYERS,
   REGIONS, MISSION_TEMPLATES, RANDOM_EVENTS, ENDINGS, FACTIONS, SURNAMES, GIVEN_1, GIVEN_2,
   NAMED_BACKGROUNDS, OFFLINE_CAP_DAYS, RECRUIT, HEIR, ELDER, AREAS, AREA_BY_KEY,
-  DAOHAO_HEAD, DAOHAO_BODY, DAOHAO_TAIL, DAOHAO_MIN_STEP,
-} from './config.js';
+  DAOHAO_HEAD, DAOHAO_BODY, DAOHAO_TAIL, DAOHAO_MIN_STEP, ORDERS } from './config.js';
 import { STORY_NODES, STORY_BY_ID } from './story.js';
 
 /* ---------- 小工具 ---------- */
@@ -502,12 +501,23 @@ export class Game {
 
   /* ---------- 时间推进 ---------- */
   advance(days, { silent = false } = {}) {
-    let remain = Math.max(0, days);
-    const total = remain;
+    /* 时间以「日」结算，但步长可以小于一天。
+       慢速档一次只推进 0.125 日，必须先攒够整天再落地，
+       否则每个 tick 都推 0 天，游戏根本走不动。
+       旧的写法用 step=min(remain,1) 取整，advance(1.5) 实际会推两天，
+       名义速度与实到速度对不上，这里一并改掉。 */
+    const total = Math.max(0, days);
+    this._acc = (this._acc || 0) + total;
+    let whole = Math.floor(this._acc + 1e-9);
+    if (whole <= 0) {
+      if (total > 0 && !silent) this.save.lastTick = Date.now();
+      return;
+    }
+    this._acc -= whole;
+
     let guard = 0;
-    while (remain > 0 && guard < 6000) {
-      const step = Math.min(remain, 1);
-      remain -= step;
+    while (whole > 0 && guard < 6000) {
+      whole--;
       this._day();
       guard++;
       if (this.save.ended) break;
@@ -520,6 +530,9 @@ export class Game {
     const s = this.save;
     s.day++;
     const day = s.day;
+
+    /* 在办结案：交办的事在这一天到期就落地 */
+    this.settleOrders();
 
     /* 阶段推进 */
     this._checkStage();
@@ -1197,10 +1210,145 @@ export class Game {
     return out.map((x) => x.d);
   }
 
+  /* ---------- 在办：旨意交办之后，要有人承办、要有日子 ---------- */
+  orders() {
+    if (!Array.isArray(this.save.orders)) this.save.orders = [];
+    return this.save.orders;
+  }
+
+  /* 阁中同时能推几件事：底数 + 在任阁老数 */
+  orderCapacity() {
+    const posts = (this.save.posts && this.save.posts.dizige) || [];
+    const on = posts.filter(Boolean).length;
+    return Math.min(ORDERS.max, ORDERS.base + on * ORDERS.perElder);
+  }
+
+  /* 积压：超出人手的那几件，排在后头 */
+  orderBacklog() {
+    return Math.max(0, this.orders().length - this.orderCapacity() + 1);
+  }
+
+  /* 当值承办人：阁老按日轮值，轮到谁是谁；阁中无人则写"阁中无人" */
+  dutyElder() {
+    const posts = (this.save.posts && this.save.posts.dizige) || [];
+    const ids = posts.filter(Boolean);
+    if (!ids.length) return { id: null, name: '阁中无人', eff: 0.5 };
+    const d = this.byId(ids[this.save.day % ids.length]);
+    if (!d) return { id: null, name: '阁中', eff: 0.5 };
+    return { id: d.id, name: d.name, eff: this.elderTierEff ? this.elderTierEff() : 1 };
+  }
+
+  /* 交办：不立即生效，进在办，到期结案 */
+  orderIssue(kind, payload = {}, title = '') {
+    const def = ORDERS.kinds[kind];
+    if (!def) return { ok: false, msg: '不明事项，无从交办' };
+    const list = this.orders();
+    const cap = this.orderCapacity();
+    const ahead = Math.max(0, list.length - cap + 1);
+    /* 阁中无人时整体拖慢，但不停办 */
+    const duty = this.dutyElder();
+    const slow = duty.id ? 1 : ELDER.idleMul;
+    const days = Math.max(1, Math.round((def.days + ahead * ORDERS.backlogDelay) * slow));
+    const o = {
+      id: (this.save.orderSeq = (this.save.orderSeq || 0) + 1),
+      kind,
+      title: title || def.title,
+      area: def.area || 'seat',
+      madeDay: this.save.day,
+      dueDay: this.save.day + days,
+      days,
+      actor: duty.name,
+      actorId: duty.id,
+      queued: ahead > 0,
+      payload,
+    };
+    list.push(o);
+    return {
+      ok: true,
+      order: o,
+      days,
+      msg: ahead > 0
+        ? `已交办：${o.title}。阁中文牍积压，约 ${days} 日后结案`
+        : `已交办：${o.title}，${o.actor} 承办，约 ${days} 日后结案`,
+    };
+  }
+
+  orderOf(kind, id) {
+    return this.orders().find((o) => o.kind === kind && o.payload
+      && (o.payload.id === id || o.payload.key === id)) || null;
+  }
+
+  /* 逐日检查在办，到期结案 */
+  settleOrders() {
+    const list = this.orders();
+    if (!list.length) return;
+    const day = this.save.day;
+    const due = [];
+    for (let i = list.length - 1; i >= 0; i--) {
+      if (list[i].dueDay <= day) { due.push(list[i]); list.splice(i, 1); }
+    }
+    if (!due.length) return;
+    due.reverse();
+    for (const o of due) {
+      try { this._settleOrder(o); } catch (e) { /* 单件失败不该拖垮整日结算 */ }
+      this.save.stats = this.save.stats || {};
+      this.save.stats.ordersDone = (this.save.stats.ordersDone || 0) + 1;
+    }
+  }
+
+  _settleOrder(o) {
+    const g = this;
+    if (o.kind === 'enshrine') {
+      const d = this.byId(o.payload.id);
+      if (!d) return;
+      this._doEnshrine(d, o);
+      return;
+    }
+    if (o.kind === 'build') {
+      const key = o.payload.key;
+      if (!key) return;
+      const f = this.facilityInfo(key);
+      const lv = this.save.fac[key] || 0;
+      this.save.fac[key] = lv + 1;
+      if (key === 'lingtian' && this.save.fac.lingtian >= 2) this.unlockLayer(2);
+      if (key === 'gongfang' && this.save.fac.gongfang >= 1) this.unlockLayer(3);
+      this.chronicle('build', '营建落成', `${f.name} 第 ${lv + 1} 级`,
+        `${f.name} 第 ${lv + 1} 级告成，由 ${o.actor} 督办，历 ${o.days} 日。`);
+      this.msg(`${f.name} 第 ${lv + 1} 级落成。`, 'good');
+      return;
+    }
+    if (o.kind === 'convert') {
+      const d = this.byId(o.payload.id);
+      if (!d) return;
+      const inst = o.payload.inst;
+      d.type = 'staff';
+      d.staffInst = inst;
+      d.state = 'idle';
+      this._touchDisc();
+      this.chronicle('turn', '转职', `${d.name} 入 ${this.instName ? this.instName(inst) : inst}`,
+        `${d.name} 转为执事，由 ${o.actor} 经办。`);
+      this.msg(`${d.name} 已转职。`, 'good');
+      return;
+    }
+  }
+
+  /* 册封不再当场生效：择吉日、下旨意，十日后行册封礼。
+     这是"组织像真机构"最直白的一条 —— 祖师说的是"准"，不是"变"。 */
   enshrine(id) {
     const d = this.byId(id);
     const chk = this.enshrineCheck(d);
     if (!chk.ok) return { ok: false, msg: chk.why };
+    const already = this.orderOf('enshrine', d.id);
+    if (already) return { ok: false, msg: `${d.name} 的册封礼已在办，${Math.max(0, already.dueDay - this.save.day)} 日后行` };
+    const r = this.orderIssue('enshrine', { id: d.id }, `册封礼·${d.name}`);
+    if (!r.ok) return r;
+    this.chronicle('order', '祖师下旨', `册封礼·${d.name}`,
+      `祖师择吉日册封 ${d.name}，旨意下至破天阁，着 ${r.order.actor} 承办，约 ${r.days} 日。`);
+    return { ok: true, msg: r.msg, order: r.order, days: r.days };
+  }
+
+  /* 册封礼当日才真正落定 */
+  _doEnshrine(d, o) {
     const si = this.stepInfo(d.step);
     d.step = 9;
     d.enshrinedDay = this.save.day;
@@ -1214,9 +1362,9 @@ export class Game {
     this._touchDisc();
     this.save.stats.peakStep = Math.max(this.save.stats.peakStep || 1, 9);
     this.addRenown(40);
-    this.chronicle('enshrine', '祖师册封', `${d.name} · 亲传`,
-      `${si.title}${d.name}（${this.rootOf(d).name}）蒙祖师亲册，列第九步亲传，道号「${d.daohao}」，入弟子阁听事。`);
-    this.msg(`祖师册封：${d.name} 为亲传弟子。`, 'story');
+    this.chronicle('enshrine', '册封礼成', `${d.name} · 亲传`,
+      `${si.title}${d.name}（${this.rootOf(d).name}）蒙祖师亲册，列第九步亲传，道号「${d.daohao}」，入弟子阁听事。礼成于第 ${this.save.day} 日，${o ? o.actor + ' 承办' : ''}。`);
+    this.msg(`册封礼成：${d.name} 列亲传弟子。`, 'story');
     return { ok: true, msg: `${d.name} 已列亲传`, disciple: d };
   }
 
@@ -1591,14 +1739,15 @@ export class Game {
     const f = this.facilityInfo(key);
     const lv = this.save.fac[key] || 0;
     if (lv >= f.maxLv) return { ok: false, msg: '已达最高等级' };
+    if (this.orderOf('build', key)) return { ok: false, msg: `${f.name} 正在营建，等落成再议` };
     const cost = this.buildCost(key);
     for (const [k, v] of Object.entries(cost)) if ((this.save.res[k] || 0) < v) return { ok: false, msg: `${RES_BY_KEY[k].name} 不足` };
     this.addRes(Object.fromEntries(Object.entries(cost).map(([k, v]) => [k, -v])));
-    this.save.fac[key] = lv + 1;
-    if (key === 'lingtian' && this.save.fac.lingtian >= 2) this.unlockLayer(2);
-    if (key === 'gongfang' && this.save.fac.gongfang >= 1) this.unlockLayer(3);
-    this.msg(`${f.name} 升至 ${lv + 1} 级。`, 'good');
-    return { ok: true, msg: '建造完成' };
+    /* 材料当场入库，工程按工期走：兴土木不是一句话的事 */
+    const r = this.orderIssue('build', { key }, `${f.name} 第 ${lv + 1} 级`);
+    if (!r.ok) { this.addRes(cost); return r; }
+    this.msg(r.msg, 'info');
+    return { ok: true, msg: r.msg, order: r.order };
   }
 
   /* ---------- 任务与派遣 ---------- */
@@ -1713,6 +1862,8 @@ export function migrate(raw) {
   save.policy.laws = Object.assign({ morning: true, curfew: false, bounty: false }, save.policy.laws || {});
   save.matterState = Object.assign({ snooze: {}, seen: {}, seenDay: 0 }, save.matterState || {});
   save.news = Array.isArray(save.news) ? save.news : [];
+  save.orders = Array.isArray(save.orders) ? save.orders : [];
+  if (typeof save.orderSeq !== 'number') save.orderSeq = 0;
   save.v = VERSION;
   return save;
 }

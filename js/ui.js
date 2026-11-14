@@ -7,6 +7,7 @@ import {
 } from './config.js';
 import { STORY_BY_ID, STORY_NODES } from './story.js';
 import { Scene, BUILDINGS } from './scene.js';
+import { morph } from './render.js';
 import {
   deriveMatters, mattersByBuilding, unreadCount, markSeen, snooze,
   memorials, floaters, STANCES, LAWS, LEVEL, BUILDING_NAMES,
@@ -103,14 +104,12 @@ export const UI = {
       if (!el || el.id !== 'discSearch') return;
       this.discFilter.q = el.value;
       this.discFilter.show = 30;
-      this._interactUntil = Date.now() + 800;
       /* 只换列表区，不碰输入框，否则光标会跳 */
       this.renderDiscList();
     });
     /* 交互窗口：按下后 1.5 秒内不做自动重排。
        同时给按下态反馈 —— 点了没动静最伤手感，先给个回应再等结算。 */
     const hold = (e) => {
-      this._interactUntil = Date.now() + 1500;
       const btn = e && e.target && e.target.closest ? e.target.closest('[data-act]') : null;
       if (btn) {
         btn.classList.add('is-busy');
@@ -378,16 +377,22 @@ export const UI = {
     /* 手指/鼠标还按在抽屉里时不重排，否则点击目标会被销毁，点了等于没点。
        但 onClick 内部发起的重排不受此限：那时点击已经派发完，
        再拦就变成「状态改了、界面不动」，正是用户说的点了没反应。 */
-    if (!force && !this._inClick && Date.now() < (this._interactUntil || 0)) return;
     const html = (map[this.panel] || map.pending)();
     /* 内容一模一样就不动 DOM：省掉每秒一次的大树重建与滚动跳动 */
-    if (!force && html === this._panelHtml) return;
+    /* 内容一模一样就一个节点都不动 —— 无论是不是 force。
+       morph 已经能分辨真正的变化，force 再单独绕过它只是白发一次工。 */
+    if (html === this._panelHtml) return;
     this._panelHtml = html;
     /* 记下这一份内容的指纹：点击分发的收尾要靠它判断该不该补一次重排 */
     this._panelSig = this.panelSignature();
     const top = body.scrollTop;
-    body.innerHTML = html;
-    if (top) body.scrollTop = top;
+    /* 就地更新：只改真正变了的节点，input 的值、焦点、光标、展开态、滚动位置全都不用再单独抢救。
+       以前这里是 body.innerHTML = html —— 每次重建九百个节点，
+       正在输入的开山人数被打回默认值，按下按钮的那一帧还会把点击本身弄丢。 */
+    const t0 = performance.now();
+    morph(body, html);
+    if (top && Math.abs(body.scrollTop - top) > 1) body.scrollTop = top;
+    this._lastRenderMs = +(performance.now() - t0).toFixed(2);
   },
 
   /* 策略指纹：自决范围八类 + 法度 + 策略档，合成一小段字符串。
@@ -841,7 +846,12 @@ export const UI = {
         ${ready.slice(0, 10).map((d) => `<div class="heir-row">
           <span class="hn">${esc(d.name)}</span>
           <span class="hi">${esc(g.rootOf(d).name)} · ${esc(g.realmInfo(d).name)} · 综合 ${Math.round(g.heirScore(d))} · 功勋 ${Math.round(d.gongxian)}</span>
-          <button class="btn sm gold" data-act="disc:heir" data-arg="${d.id}">册封</button>
+          ${(() => {
+      const o = g.orderOf('enshrine', d.id);
+      return o
+        ? `<span class="pill mute">在办 ${Math.max(0, o.dueDay - g.save.day)} 日</span>`
+        : `<button class="btn sm gold" data-act="disc:heir" data-arg="${d.id}">册封</button>`;
+    })()}
         </div>`).join('')}
       </div>
       <p class="hint">名额不设上限：够格就能册，册不册在祖师。天赋只是门票，综合分只定先后。${ready.length > 10 ? `另有 ${ready.length - 10} 人候册，此处只列综合分前十。` : ''}</p>`
@@ -855,9 +865,9 @@ export const UI = {
           ${bnCount ? `<button class="btn sm ghost" data-act="exam">第三步选拔 · 待考 ${bnCount}</button>` : ''}
         </div>
         <div class="rec-inputs">
-          <label><span>人数</span><input id="recruitCount" type="number" min="1" max="200" value="1" inputmode="numeric"></label>
-          <label><span>赐姓</span><input id="recruitSurname" type="text" maxlength="2" placeholder="不改"></label>
-          <label><span>字辈</span><input id="recruitGen" type="text" maxlength="1" placeholder="随取"></label>
+          <label><span>人数</span><input id="recruitCount" data-keep="1" type="number" min="1" max="200" value="1" inputmode="numeric"></label>
+          <label><span>赐姓</span><input id="recruitSurname" data-keep="1" type="text" maxlength="2" placeholder="不改"></label>
+          <label><span>字辈</span><input id="recruitGen" data-keep="1" type="text" maxlength="1" placeholder="随取"></label>
         </div>
         <div class="rec-grid">
           <div class="rec">
@@ -875,7 +885,7 @@ export const UI = {
           <div class="rw-top"><b>亲自开山</b><span>按资质分流 · 一批一百至两百人</span></div>
           <p class="rec-desc">招一大批：先验根骨，达标者入正式，其余入杂役。不够一百人凑不成一批。</p>
           <div class="row" style="flex-wrap:wrap">
-            <label class="rec-num"><span>人数</span><input id="recruitBatchCount" type="number" min="100" max="200" value="120" inputmode="numeric"></label>
+            <label class="rec-num"><span>人数</span><input id="recruitBatchCount" data-keep="1" type="number" min="100" max="200" value="120" inputmode="numeric"></label>
             <button class="btn sm gold" data-act="recruit" data-arg="batch">开山收徒</button>
           </div>
         </div>
@@ -891,7 +901,7 @@ export const UI = {
         <div class="row" style="flex-wrap:wrap;margin-top:8px">
           ${[['power', '战力'], ['step', '步数'], ['life', '寿元'], ['demon', '心魔'], ['join', '入门']]
         .map(([k, n]) => `<button class="btn sm ${f.sort === k ? 'ghost' : ''}" data-act="filter" data-arg="sort:${k}">${n}</button>`).join('')}
-          <input class="disc-search" id="discSearch" type="search" placeholder="搜索姓名" value="${esc(f.q || '')}">
+          <input class="disc-search" id="discSearch" data-keep="1" type="search" placeholder="搜索姓名" value="${esc(f.q || '')}">
         </div>
       </div>
 
@@ -983,11 +993,11 @@ export const UI = {
     if (!box) return this.renderPanel(true);
     const body = document.getElementById('panelBody');
     const top = body ? body.scrollTop : 0;
-    const tpl = document.createElement('div');
+    const tpl = document.createElement('template');
     tpl.innerHTML = this.discListHtml();
-    const next = tpl.firstElementChild;
-    if (next) box.replaceWith(next);
-    if (body) body.scrollTop = top;
+    const root = tpl.content.firstElementChild;
+    if (root) morph(box, root.innerHTML);
+    if (body && Math.abs(body.scrollTop - top) > 1) body.scrollTop = top;
   },
 
   /* 触底加载：离底 240px 就预取，手感上感觉不到"翻页" */
@@ -1039,12 +1049,55 @@ export const UI = {
         ${d.type === 'formal' && d.state === 'bottleneck' && d.step < 9 && d.step !== 3 ? `<button class="btn sm primary" data-act="disc:break" data-arg="${d.id}">突破</button>` : ''}
         ${d.type === 'formal' && d.step >= 4 ? `<button class="btn sm ghost" data-act="disc:convert" data-arg="${d.id}">转职</button>` : ''}
         ${d.type === 'staff' ? `<button class="btn sm ghost" data-act="disc:back" data-arg="${d.id}">复归弟子</button>` : ''}
-        ${d.type === 'formal' && d.step === 8 && g.enshrineCheck(d).ok ? `<button class="btn sm gold" data-act="disc:heir" data-arg="${d.id}">册封亲传</button>` : ''}
+        ${d.type === 'formal' && d.step === 8 && g.enshrineCheck(d).ok
+    ? (() => {
+      const o = g.orderOf('enshrine', d.id);
+      return o
+        ? `<button class="btn sm ghost" disabled>册封礼在办 · ${Math.max(0, o.dueDay - g.save.day)} 日</button>`
+        : `<button class="btn sm gold" data-act="disc:heir" data-arg="${d.id}">册封亲传</button>`;
+    })()
+    : ''}
       </div>
     </div>`;
   },
 
   /* ---------- 机构 ---------- */
+  /* 在办文牍：旨意下了不算数，办完才算数。
+     这是"组织像真机构"最直白的一块 —— 祖师看到的是进度，不是瞬移。 */
+  orderCard() {
+    const g = this.game;
+    const list = g.orders();
+    const cap = g.orderCapacity();
+    const queued = list.filter((o) => o.queued).length;
+
+    if (!list.length) {
+      return `<div class="card tight"><div class="spread">
+        <div><b>在办文牍</b><div class="hint" style="margin:2px 0 0">阁中手头无事。旨意一下即入此列，到期结案才报备。</div></div>
+        <span class="pill mute">空 · 可并行 ${cap} 件</span></div></div>`;
+    }
+
+    const rows = list.slice().sort((a, b) => a.dueDay - b.dueDay).map((o) => {
+      const left = Math.max(0, o.dueDay - g.save.day);
+      const span = Math.max(1, o.dueDay - o.madeDay);
+      const pct = Math.min(100, Math.round(((g.save.day - o.madeDay) / span) * 100));
+      return `<div class="item"><div class="main">
+        <div class="name">${esc(o.title)}${o.queued ? ' <span class="pill mute">积压中</span>' : ''}</div>
+        <div class="meta"><span>${esc(o.actor)} 承办</span><span>第 ${o.madeDay} 日下旨</span><span>${left ? left + ' 日后结案' : '今日结案'}</span></div>
+        <div class="bar" style="margin-top:5px"><i style="width:${pct}%"></i></div>
+      </div></div>`;
+    }).join('');
+
+    return `<div class="card">
+      <div class="card-head">
+        <div class="t"><h3>在办文牍</h3><small>旨意已下 · 到期结案 · 结案才报备</small></div>
+        <span class="pill ${queued ? 'gold' : 'jade'}">在办 ${list.length} · 可并行 ${cap}</span>
+      </div>
+      <div class="list">${rows}</div>
+      ${queued ? `<p class="hint" style="color:var(--seal)">积压 ${queued} 件：超出阁中人手的部分每件顺延 ${2} 日。增设阁老席位或在阁中指派执事，方能提速。</p>`
+    : '<p class="hint">阁中尚有余力。事多过人手时才会积压。</p>'}
+    </div>`;
+  },
+
   pOrg() {
     const g = this.game; const s = g.save;
     const q = g.elderQuorum();
@@ -1073,6 +1126,7 @@ export const UI = {
 
     const heirs = g.formal().filter((d) => d.step === 9);
     return `<div class="stack">
+      ${this.orderCard()}
       <div class="card tight"><p class="hint">第${g.maxStep() || 0}步为当前最高。弟子阁席位随山门层数开（今 ${g.seatCount('dizige')} 席），亲传、核心弟子皆可入，不足时内门降格任职；空缺由破天阁按阶梯自行补选，也可在此亲择。</p></div>
       ${q.ok ? '' : `<div class="card tight"><div class="spread"><div><b>阁中无人主事</b><div class="hint" style="margin:2px 0 0">宗务仍按旧档慢办（周期 ×${ELDER.idleMul}），不至积压。指一人入阁即可复常。</div></div><button class="btn sm primary" data-act="org:quorum">指派一人入阁</button></div></div>`}
       ${blocks}
@@ -1409,9 +1463,7 @@ export const UI = {
   onClick(e) {
     const t = e.target.closest('[data-act]');
     if (!t) return;
-    /* 标记「这是点击内部发起的重排」，让 renderPanel 放行 */
-    this._inClick = true;
-    try { this.dispatchAct(t); } finally { this._inClick = false; }
+    this.dispatchAct(t);
   },
 
   dispatchAct(t) {
@@ -1588,15 +1640,11 @@ export const UI = {
       case 'layer:open': { const r = g.openNextLayer(); this.toast(r.msg); done(); break; }
       default: break;
     }
-    /* 点击引发的状态变化必须立刻可见。
-       hold 在 pointerdown 时就把 _interactUntil 推到 1.5 秒后，
-       而不少 case 里紧跟的 renderPanel() 不带 force，会被那个窗口直接挡掉 ——
-       表现就是"点了没反应"：状态变了，界面还停在旧的那一帧。
-       这里按指纹补一刀：状态真变了才强制重排，没变就一个 DOM 都不动。 */
+    /* 点击引起的状态变化当场可见。就地更新只改真正变了的节点，
+       不会销毁刚点过的那颗按钮，所以这里可以每次都刷：几毫秒，换掉「点了没反应」。 */
     const panel = document.getElementById('panel');
-    if (panel && panel.getAttribute('aria-hidden') === 'false') {
-      const sig = this.panelSignature();
-      if (sig && sig !== this._panelSig) this.renderPanel(true);
+    if (panel && panel.getAttribute('aria-hidden') === 'false' && this.panel !== 'scene') {
+      this.renderPanel(true);
     }
   },
 
